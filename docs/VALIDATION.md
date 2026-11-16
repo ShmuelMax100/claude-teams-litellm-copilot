@@ -8,6 +8,7 @@ Run setup commands from the folder containing `setup`. Administrator and develop
 2. Run `./setup admin` and select **Prepare customer gateway**. Enter the gateway HTTPS origin and administrator key when prompted. Review the changes before applying them. Expect **Gateway ready**.
 3. Repeat preparation with the same model options. Expect matching resources to be reused. A conflicting route must stop setup for review.
 4. Select **Invite a new developer**. Provide their work email and exact GitHub username, choose the model policy, and save a private `.invite.json`. Expect **Invitation ready** and **No email was sent**.
+   Follow the [invitation example](INVITATION-EXAMPLE.txt) using your own gateway and developer identities. Verify file permissions are 600, the key belongs to that developer, and its fallback policy matches the reviewed selection. Reusing the file must preserve the key and expiry.
 5. Share the package and that invitation through your approved private channel. The email labels a user record; it does not verify a mailbox or send a message.
 
 ## Developer
@@ -29,6 +30,12 @@ Do not deliberately exhaust a user's subscription as a routine onboarding check.
 ## Restore, renewal and offboarding
 
 Test **Developer → Restore previous settings** in a disposable profile. It should restore the saved configuration and refuse to overwrite later edits. Restoring settings does not revoke the key. The administrator owns key renewal, revocation and provider-access review.
+
+## Invitation walkthrough recheck · 16 November 2026
+
+The documented `./setup admin` menu flow was rerun against a disposable LiteLLM 1.108.0 gateway: prepare routes, create an invitation using the recommended policy, and validate it through the developer code. File mode 600, 90-day expiry, key ownership and saved fallback mappings passed. Repeating preparation and invitation creation preserved the routes, key and expiry. Developer settings configuration and restore passed in an isolated profile. All 17 automated tests and package checks passed.
+
+This documentation recheck made no provider inference requests and did not repeat browser consent or the earlier real-quota fallback test.
 
 ## Offline checks for maintainers
 

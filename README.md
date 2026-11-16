@@ -42,6 +42,29 @@ python3 --version
 
 The email identifies the LiteLLM user and supports repeat enrollment. **No email is sent or verified, and SMTP is not required.** The invitation contains a personal 90-day gateway key. It does not contain the administrator key or provider sign-in tokens. Each developer gets their own file.
 
+### Example: create one developer’s invitation
+
+In the folder containing `setup`, run:
+
+```sh
+./setup admin
+```
+
+Select **2 · Invite a new developer**. Enter your gateway URL and administrator key when prompted, then use your developer’s real details in place of these examples:
+
+| Prompt | Example answer |
+|---|---|
+| Developer work email | `alex@customer.example` |
+| Developer GitHub username | `alex-dev` |
+| Include Copilot Opus? | `no`, unless access is verified |
+| Fallback policy | `1` — Use recommended model mapping |
+| Save private invitation to | Press Enter for `private/alex-dev.invite.json` |
+| Create or reuse this personal 90-day invitation? | `yes` after reviewing the policy |
+
+Expected: **Invitation ready: private/alex-dev.invite.json**. The folder is created automatically and the file has owner-only permissions (600). [View the example dialogue](docs/INVITATION-EXAMPLE.txt); it illustrates interactive answers, not commands to paste into a shell.
+
+Deliver that file privately to Alex. On Alex’s machine, run `./setup developer`, choose **1 · Join with my invitation**, and enter the received file’s location. No email is sent. Repeat with a separate identity and filename for each developer. Reusing a valid invitation preserves its key and original expiry; use a new filename to issue a new 90-day key.
+
 ### Existing gateway requirements
 
 - Customer HTTPS origin, PostgreSQL, and `general_settings.store_model_in_db: true`.

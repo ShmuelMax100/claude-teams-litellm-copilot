@@ -1,0 +1,25 @@
+Choose an action
+  1) Prepare customer gateway
+  2) Invite a new developer
+  3) Show model options
+  4) Back
+Choose [1]: 2
+Customer gateway URL [...]: https://litellm.customer.example
+Administrator key (hidden; kept in memory): [enter privately]
+Developer work email: alex@customer.example
+Developer GitHub username: alex-dev
+Include Copilot Opus? Only if customer access is verified [no]: no
+Fallback policy
+  1) Use recommended model mapping
+  2) Choose a backup for each primary family
+Choose [1]: 1
+Save private invitation to [private/alex-dev.invite.json]: [press Enter]
+
+PRIMARY ON CLAUDE TEAMS       BACKUP ON GITHUB COPILOT
+Sonnet 5.5                   Sonnet 5.5
+Opus 5.5                     Sonnet 5.5
+Haiku 5.5                    Haiku 5.5
+
+Create or reuse this personal 90-day invitation? [no]: yes
+✓ Invitation ready: private/alex-dev.invite.json
+DELIVERY No email was sent. You must deliver the invitation yourself.

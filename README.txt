@@ -24,6 +24,17 @@ No email is sent. Work email identifies the LiteLLM user and supports repeat
 enrollment; it is not mailbox verification. Deliver the invitation yourself
 through an approved private channel. Use HANDOFF-TEMPLATE.txt for instructions.
 
+INVITATION EXAMPLE
+Run ./setup admin, choose 2 (Invite a new developer), and enter your gateway URL
+and administrator key if asked. Example developer: alex@customer.example,
+GitHub username alex-dev. Keep optional Opus disabled unless verified; select
+policy 1 (recommended), accept private/alex-dev.invite.json, review, and type yes.
+Replace those example identities with the actual developer's details.
+Expected: Invitation ready. The file has owner-only permissions (600).
+See docs/INVITATION-EXAMPLE.txt for the interactive dialogue, not a shell script.
+Deliver the file privately; the developer runs ./setup developer and chooses 1.
+Reusing a valid file keeps the existing key and expiry, rather than renewing it.
+
 DEVELOPER
 Choose Developer → Join with my invitation. Connect your own accounts, wait for
 the checks, restart open sessions, then run claude normally.
