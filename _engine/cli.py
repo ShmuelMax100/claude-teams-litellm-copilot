@@ -101,7 +101,18 @@ class Wizard:
         return catalog_policy(opus,choices),opus
     def prepare(self):
         ui=self.ui;ui.header('Administrator · prepare gateway')
-        api=self.admin_api();c,opus=self.catalog()
+        api=self.admin_api()
+        if ui.choose('Integration mode',['Claude subscription with Copilot fallback (legacy)','Direct Copilot only'])==1:
+            import copilot
+            c=copilot.catalog([ui.ask('Direct alias=Copilot-model-ID (verify entitlement first)')])
+            c['server_config']=input_path(ui.ask('Active server configuration exported as JSON'))
+            ui.note('Merge this fragment through the gateway deployment process, preserving existing configuration:')
+            ui.note(json.dumps(copilot.fragment(c),indent=2))
+            copilot.prepare(api,c,False)
+            if ui.yes('Apply credential preparation?'):copilot.prepare(api,c,True)
+            ui.note('Next: ./setup --mode copilot-only enroll --help')
+            return
+        c,opus=self.catalog()
         with contextlib.redirect_stdout(io.StringIO()) as capture:admin.setup(api,c,False)
         preview=capture.getvalue().replace('Preview only. Add --apply to install this plan.','').strip()
         ui.note(preview);show_policy(ui,c['fallbacks'])
@@ -112,6 +123,18 @@ class Wizard:
     def invite(self):
         ui=self.ui;ui.header('Administrator · invite developer')
         api=self.admin_api()
+        if ui.choose('Integration mode',['Claude subscription with Copilot fallback (legacy)','Direct Copilot with existing user/key'])==1:
+            import copilot
+            c=copilot.catalog([ui.ask('Direct alias=Copilot-model-ID')])
+            c['server_config']=input_path(ui.ask('Active server configuration exported as JSON'))
+            uid=ui.ask('Existing LiteLLM user ID');login=ui.ask('Expected GitHub username')
+            key=getpass.getpass('  Existing personal virtual key (hidden): ')
+            protocol=['chat','messages'][ui.choose('Client protocol',['Chat Completions','Anthropic Messages / Claude Code'])]
+            destination=input_path(ui.ask('Private invitation destination'))
+            copilot.enroll_existing(api,c,uid,login,key,destination,protocol,False)
+            if ui.yes('Apply the displayed key policy and save invitation?'):
+                copilot.enroll_existing(api,c,uid,login,key,destination,protocol,True)
+            return
         ui.note('Work email identifies the developer in LiteLLM. This wizard does not send email.')
         email=ui.ask('Developer work email');login=ui.ask('Developer GitHub username')
         c,opus=self.catalog(custom=True)
@@ -126,11 +149,16 @@ class Wizard:
         ui.note('NEXT     Developer runs ./setup and chooses Developer → Join.')
         ui.warn('The invitation contains their personal key. Deliver it privately.')
     def join(self):
-        ui=self.ui;ui.header('Developer · join gateway');developer.preflight()
+        ui=self.ui;ui.header('Developer · join gateway')
         ui.note('You need: your private invitation, Claude Teams access and Copilot access.')
         ui.note('Paste the invitation path or drag its file into this terminal.')
         path=input_path(ui.ask('Path to your private invitation'));inv=read(path)
         developer.validate_invitation_shape(inv)
+        if inv.get('mode')=='copilot-only':
+            import copilot
+            if ui.yes('Connect your own GitHub account? No inference or client settings changes.',True):copilot.join(inv)
+            return
+        developer.preflight()
         ui.note('Gateway: '+origin(inv['gateway']));ui.note('GitHub identity: '+inv['github_login'])
         if os.environ.get('ANTHROPIC_BASE_URL') and os.environ['ANTHROPIC_BASE_URL'].rstrip('/')!=inv['gateway']:
             raise Error('Unset the conflicting ANTHROPIC_BASE_URL shell override before joining.')
@@ -211,7 +239,18 @@ class Wizard:
             except (Error,ValueError,KeyError,OSError) as e:self.ui.warn(str(e));self.ui.note('Correct the issue and retry. No key is included in this message.')
 
 def main():
+    sys.argv=[part for arg in sys.argv for part in (['--mode',arg.split('=',1)[1]] if arg.startswith('--mode=') else [arg])]
+    if '--mode' in sys.argv:
+        args=sys.argv[1:];i=args.index('--mode')
+        if i+1>=len(args):raise Error('--mode requires legacy or copilot-only.')
+        mode=args[i+1];del args[i:i+2]
+        if mode=='copilot-only':
+            import copilot
+            return copilot.main(args)
+        if mode!='legacy':raise Error('Unsupported integration mode.')
+        sys.argv=[sys.argv[0]]+args
     p=argparse.ArgumentParser(prog='./setup',description='Guided Claude Teams + LiteLLM + Copilot onboarding')
+    p.epilog='Direct mode: ./setup --mode copilot-only --help (legacy is the default).'
     p.add_argument('role',nargs='?',choices=['admin','developer','doctor','models']);args=p.parse_args()
     w=Wizard()
     if args.role=='doctor':w.doctor()

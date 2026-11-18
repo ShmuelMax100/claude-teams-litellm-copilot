@@ -1,5 +1,7 @@
 # Configuration reference
 
+This page describes the legacy default. For direct Copilot integration and its fail-closed configuration prerequisites, see [Copilot-only](COPILOT-ONLY.md).
+
 The guided CLI writes native LiteLLM resources through the management API. The model catalog lives in [`_engine/catalog.json`](../_engine/catalog.json); the installer logic lives in [`admin.py`](../_engine/admin.py) and [`developer.py`](../_engine/developer.py).
 
 ## Existing gateway configuration

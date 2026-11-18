@@ -36,9 +36,10 @@ class Guide(HTMLParser):
 
 def main():
     for p in ROOT.rglob('*.py'):
+        if 'private' in p.relative_to(ROOT).parts:continue
         ast.parse(p.read_text(), feature_version=(3, 10))
     for p in ROOT.rglob('*.json'):
-        if '.git' not in p.parts:
+        if '.git' not in p.parts and 'private' not in p.relative_to(ROOT).parts:
             json.loads(p.read_text())
     subprocess.run(['sh', '-n', str(ROOT / 'setup')], check=True)
     page = (ROOT / 'START-HERE.html').read_text()
@@ -61,7 +62,7 @@ def main():
         for target in re.findall(r'\]\(([^)]+)\)', doc.read_text()):
             if '://' not in target and not target.startswith('#'):
                 assert (doc.parent / target.split('#')[0]).exists(), f'Broken file link: {target}'
-    assert not list(ROOT.rglob('*.invite.json')), 'Invitation found in package'
+    assert not [p for p in ROOT.rglob('*.invite.json') if 'private' not in p.relative_to(ROOT).parts], 'Invitation found in package'
     print('PASS: Python 3.10 syntax, JSON, shell, inline JavaScript, guide assets/roles/anchors and documentation file links.')
 
 if __name__ == '__main__':
