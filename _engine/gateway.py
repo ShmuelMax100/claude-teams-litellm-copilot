@@ -1,5 +1,5 @@
 """Shared, dependency-free helpers. No provider credentials are handled here."""
-import json, os, tempfile, urllib.error, urllib.parse, urllib.request
+import http.client, json, os, tempfile, urllib.error, urllib.parse, urllib.request
 from pathlib import Path
 
 class Error(Exception):
@@ -30,7 +30,7 @@ class API:
             if missing and e.code==404:return None
             # Upstream errors may contain credentials or request bodies; do not echo them.
             raise Error(f'{method} {path.split("?")[0]} returned HTTP {e.code}. Check gateway Logs.') from None
-        except (urllib.error.URLError,TimeoutError):
+        except (urllib.error.URLError,TimeoutError,ConnectionError,http.client.HTTPException):
             raise Error('Gateway could not be reached. Check its URL, network and TLS certificate.') from None
 
 def read(path): return json.loads(Path(path).read_text())
@@ -41,7 +41,11 @@ def private_write(path,value):
         os.chmod(f.name,0o600); json.dump(value,f,indent=2); f.write('\n'); tmp=f.name
     os.replace(tmp,path)
 
-def load_catalog(include_opus=False):
+def load_catalog(include_opus=False,mode="legacy",selections=None):
+    if mode not in ("legacy","copilot-only"):raise Error("Unsupported integration mode.")
+    if mode=="copilot-only":
+        from copilot import catalog
+        return catalog(selections)
     c=read(Path(__file__).with_name('catalog.json'))
     omitted=set() if include_opus else set(c['optional_models'])
     c['models']=[m for m in c['models'] if m['model_name'] not in omitted]

@@ -1,3 +1,8 @@
+DIRECT COPILOT PILOT: ./setup --mode copilot-only --help
+No Claude subscription is required. Read docs/COPILOT-ONLY.md for supported
+file-managed configuration and key-wide no-fallback requirements. Live acceptance
+is tracked separately in COPILOT-VALIDATION.json. The default workflow below is unchanged.
+
 CLAUDE GATEWAY · CUSTOMER ONBOARDING
 ==================================
 

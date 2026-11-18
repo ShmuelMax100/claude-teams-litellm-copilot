@@ -49,3 +49,7 @@ python3 tools/check_public.py
 ```
 
 These checks use temporary profiles and placeholder credentials. They do not consume provider quota. Browser consent, customer networking, organization policies, model entitlements and live provider behavior require the deployment checks above.
+
+## Copilot-only pilot · 18 November 2026
+
+See [the direct-mode guide](COPILOT-ONLY.md) and [the structured results](../COPILOT-VALIDATION.json). The latter distinguishes unit coverage, controlled gateway tests and verified live Copilot checks with documented limitations. The original validation above describes the legacy workflow.

@@ -20,6 +20,9 @@ def same_route(existing,wanted):
     return all(a.get(k)==v for k,v in b.items()) and existing.get('model_info',{}).get('cooldown_time')==0
 
 def setup(api,c,apply):
+    if c.get('mode')=='copilot-only':
+        import copilot
+        return copilot.prepare(api,c,apply)
     cred=api.call('/credentials/by_name/'+c['credential'],missing=True)
     if cred and (cred.get('credential_values',{}).get('github_copilot_auth_type')!='per_user_oauth'
                  or cred.get('credential_info',{}).get('custom_llm_provider')!='github_copilot'):
@@ -49,6 +52,7 @@ def setup(api,c,apply):
     print('Setup complete. Existing gateway infrastructure and unrelated routes were preserved.')
 
 def enroll(api,c,email,login,path):
+    if c.get('mode')=='copilot-only':raise Error('Use copilot-only enroll with an explicitly selected existing user and key.')
     email=email.strip().lower()
     if not re.fullmatch(r'[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?',login):raise Error('Invalid GitHub login.')
     if not re.fullmatch(r'[^@\s]+@[^@\s]+',email):raise Error('Enter a work email with a name and domain. It identifies the gateway user; no email is sent.')
@@ -101,12 +105,21 @@ def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('command',choices=['setup','enroll']);p.add_argument('--gateway',required=True)
     p.add_argument('--apply',action='store_true');p.add_argument('--include-opus',action='store_true',help='Enable Copilot Opus and Opus-to-Opus fallback only after entitlement is verified.')
+    p.add_argument('--mode',choices=['legacy','copilot-only'],default='legacy');p.add_argument('--model',action='append');p.add_argument('--server-config',type=Path);p.add_argument('--user-id');p.add_argument('--protocol',choices=['chat','messages'],default='chat')
     p.add_argument('--email');p.add_argument('--github-login');p.add_argument('--out',type=Path)
     a=p.parse_args();origin(a.gateway)
-    if a.command=='enroll' and not all([a.email,a.github_login,a.out]):p.error('enroll requires --email, --github-login and --out')
+    if a.mode=='legacy' and a.command=='enroll' and not all([a.email,a.github_login,a.out]):p.error('enroll requires --email, --github-login and --out')
     key=getpass.getpass('LiteLLM administrator key (hidden): ').strip()
     if not key:raise Error('No administrator key supplied.')
-    api=API(a.gateway,key);c=load_catalog(a.include_opus)
+    api=API(a.gateway,key)
+    if a.mode=='copilot-only':
+        import copilot
+        if not a.server_config:p.error('--server-config is required for copilot-only')
+        c=load_catalog(mode=a.mode,selections=a.model);c['server_config']=a.server_config
+        if a.command=='setup':return setup(api,c,a.apply)
+        if not all([a.user_id,a.github_login,a.out]):p.error('copilot-only enroll requires --user-id, --github-login, --out')
+        return copilot.enroll_existing(api,c,a.user_id,a.github_login,getpass.getpass('Existing virtual key (hidden): '),a.out,a.protocol,a.apply)
+    c=load_catalog(a.include_opus)
     if a.command=='setup':setup(api,c,a.apply)
     else:enroll(api,c,a.email,a.github_login,a.out)
 

@@ -1,5 +1,7 @@
 # Claude Teams + LiteLLM + GitHub Copilot
 
+For direct GitHub Copilot without a Claude subscription or fallback, see the [copilot-only pilot guide](docs/COPILOT-ONLY.md). Use `./setup --mode copilot-only --help`. The original workflow remains the default.
+
 **One onboarding flow. Personal provider identities. Automatic fallback at the gateway.**
 
 This onboarding package connects Claude Code to an **existing customer LiteLLM gateway**. Requests first use the developer’s eligible Claude Teams subscription. If a mapped primary request fails with an eligible provider error, LiteLLM tries the configured GitHub Copilot model using that developer’s connected account.

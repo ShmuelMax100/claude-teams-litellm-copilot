@@ -9,7 +9,15 @@ CONFLICTS=['ANTHROPIC_API_KEY','ANTHROPIC_AUTH_TOKEN','ANTHROPIC_MODEL','ANTHROP
 
 def validate_invitation_shape(invite):
     if not isinstance(invite,dict):raise Error('The invitation must be a JSON object. Use the private .invite.json file supplied by your administrator.')
-    if invite.get('format')!=1:raise Error('Unsupported invitation format.')
+    if invite.get('format') not in (1,2):raise Error('Unsupported invitation format.')
+    mode=invite.get('mode','legacy')
+    if mode not in ('legacy','copilot-only') or (invite['format']==1 and mode!='legacy') or (invite['format']==2 and mode!='copilot-only'):
+        raise Error('Invitation format and integration mode are inconsistent.')
+    if mode=='copilot-only':
+        if invite.get('protocol') not in ('chat','messages') or invite.get('fallback_policy')!={'metadata':{'disable_fallbacks':True}}:
+            raise Error('Invalid copilot-only protocol or routing policy.')
+        if any('*' in str(m) or str(m).startswith('anthropic/') for m in invite.get('models',[])):
+            raise Error('Copilot-only invitations require explicit direct models.')
     for field in ('gateway','key','user_id','github_login','credential'):
         if not isinstance(invite.get(field),str) or not invite[field].strip():
             raise Error('The invitation is missing a valid '+field+'. Ask your administrator for a new invitation.')
@@ -20,6 +28,9 @@ def validate_invitation_shape(invite):
 
 def validate_invite(invite):
     validate_invitation_shape(invite)
+    if invite.get('mode')=='copilot-only':
+        import copilot
+        return copilot.validate(invite)
     api=API(invite['gateway'],invite['key']);info=key_info(api)
     if info['user_id']!=invite['user_id']:raise Error('Invitation and key owner do not match.')
     u=api.call('/user/info').get('user_info',{})
@@ -49,11 +60,11 @@ def connect(api,invite,no_browser=False):
             status=result.get('status')
             if status=='connected':connection=result;fresh=True;break
             if status not in ('pending','slow_down'):raise Error('GitHub sign-in did not complete: '+str(status)+'. Rerun join.')
-            interval=max(interval+(5 if status=='slow_down' else 0),int(result.get('interval',interval)))
+            interval=max(interval+(5 if status=='slow_down' else 0),int(result.get('interval') or interval))
             if interval>60:raise Error('GitHub sign-in is rate limited. Rerun join later.')
         if not connection:raise Error('GitHub authorization expired. Rerun join.')
     if connection.get('github_login','').lower()!=invite['github_login'].lower():
-        if fresh:api.call('/credentials/'+credential+'/user_connection','DELETE')
+        if fresh and invite.get('mode')!='copilot-only':api.call('/credentials/'+credential+'/user_connection','DELETE')
         raise Error('Wrong GitHub account connected. Contact the administrator; local settings were not changed.')
     print('GitHub Copilot connection verified.',flush=True)
 
@@ -80,6 +91,12 @@ def configure(invite,directory):
         'ANTHROPIC_DEFAULT_HAIKU_MODEL':'claude-haiku-5-5',
         'CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY':'1','CLAUDE_CODE_AUTO_MODE_SERVER':'0'})
     updated['model']='sonnet'
+    if invite.get('mode')=='copilot-only':
+        env['ANTHROPIC_AUTH_TOKEN']=invite['key']
+        env['ANTHROPIC_CUSTOM_HEADERS']='\n'.join(line for line in headers if not line.lower().startswith('x-litellm-api-key:'))
+        for name in ('ANTHROPIC_MODEL','ANTHROPIC_DEFAULT_SONNET_MODEL','ANTHROPIC_DEFAULT_OPUS_MODEL','ANTHROPIC_DEFAULT_HAIKU_MODEL'):
+            env[name]=invite['models'][0]
+        updated['model']=invite['models'][0]
     previous=read(state) if state.exists() else {}
     if before==updated and previous.get('gateway')==invite['gateway']:
         print('Claude Code settings already configured; no duplicate backup created.');return settings
@@ -91,7 +108,7 @@ def configure(invite,directory):
     private_write(state,{'gateway':invite['gateway'],'user_id':invite['user_id'],
         'github_login':invite['github_login'],'credential':invite['credential'],'models':invite['models'],
         'backup':str(backup/'settings.json'),'previously_existed':existed,
-        'installed_hash':hashlib.sha256(settings.read_bytes()).hexdigest()})
+        'mode':invite.get('mode','legacy'),'installed_hash':hashlib.sha256(settings.read_bytes()).hexdigest()})
     print('Claude Code configured. Private backup: '+str(backup/'settings.json'),flush=True)
     return settings
 
@@ -117,6 +134,9 @@ def preflight():
     if conflicts:raise Error('Clear these shell overrides and their shell-profile entries: '+', '.join(conflicts))
 
 def join(invite,no_browser=False):
+    if invite.get('mode')=='copilot-only':
+        import copilot
+        return copilot.join(invite,no_browser)
     preflight()
     if os.environ.get('ANTHROPIC_BASE_URL') and os.environ['ANTHROPIC_BASE_URL'].rstrip('/')!=invite['gateway']:
         raise Error('Unset the conflicting ANTHROPIC_BASE_URL shell override before joining.')
@@ -169,8 +189,8 @@ def doctor():
     print('PASS: personal identity, GitHub connection, Copilot inference and Claude Code reply.')
     return result
 
-def undo():
-    d=Path.home()/'.claude';state=read(d/'gateway-onboarding.json');settings=d/'settings.json'
+def undo(directory=None):
+    d=Path(directory) if directory else Path.home()/'.claude';state=read(d/'gateway-onboarding.json');settings=d/'settings.json'
     if hashlib.sha256(settings.read_bytes()).hexdigest()!=state['installed_hash']:
         raise Error('Settings changed since onboarding. Merge the private backup manually: '+state['backup'])
     if state['previously_existed']:private_write(settings,read(state['backup']))

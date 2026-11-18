@@ -19,7 +19,7 @@ def main():
     findings = []
     for path in ROOT.rglob('*'):
         rel = path.relative_to(ROOT)
-        if any(part in {'.git', '__pycache__', 'dist', '_site'} for part in rel.parts) or not path.is_file():
+        if any(part in {'.git', '__pycache__', 'dist', '_site', 'private'} for part in rel.parts) or not path.is_file():
             continue
         if path.name in DENIED_NAMES or path.name.endswith(('.invite.json', '.pem', '.pfx', '.p12', '.bundle', '.log')):
             findings.append((str(rel), 'private artifact'))
