@@ -1,146 +1,125 @@
 import asyncio
 from dataclasses import replace
-import json
-import os
-import signal
-import sys
 from pathlib import Path
-
 import pytest
-
 from config import Config
 from copilot_runner import CopilotRunner
 
 
-@pytest.mark.parametrize("tier", ["standard", "high", "max"])
-async def test_documented_tiers_and_safe_command(config, tier):
-    runner = CopilotRunner(config)
+@pytest.mark.parametrize('tier', ['standard', 'high', 'max'])
+async def test_native_tiers_fresh_sessions_and_warm_runtime(config, factory, tier):
+    runner = CopilotRunner(config, client_factory=factory)
+    await runner.probe()
     await runner.probe()
     assert runner.capable
-    result = await runner.run(tier, "env")
-    assert result.ok
-    data = json.loads(result.output)
-    args = data["ARGS"]
-    assert args[args.index("--fusion-tier") + 1] == tier
-    assert args[args.index("--model") + 1] == "fusion"
-    assert "--allow-all" not in args
-    assert "--no-custom-instructions" in args
-    assert "--disable-builtin-mcps" in args
-    assert "--deny-tool" in args
-    assert data["HOME"] != data["CWD"]
-    assert data["COPILOT_GITHUB_TOKEN"] == "[REDACTED]"
+    assert len(factory.clients) == 1
+    client = factory.clients[0]
+    assert client.starts == 1 and client.sessions == [] and client.prompts == []
+    for _ in range(2):
+        result = await runner.run(tier, 'hello')
+        assert result.ok and result.output == 'mock answer' and result.exit_code is None
+    a, b = client.sessions
+    assert a.session_id != b.session_id
+    assert a.options['working_directory'] != b.options['working_directory']
+    for session in client.sessions:
+        options = session.options
+        assert options['github']['capi'] == {'fusion_tier': tier}
+        assert options['model'] == 'fusion' and options['tools']['available_tools'] == []
+        assert not options['enable_config_discovery'] and not options['skills']['enabled']
+        assert not options['state']['memory']['enabled']
+        assert session.disconnected and session.session_id in client.deleted
+        assert not Path(options['working_directory']).exists()
+    await runner.close()
     assert not list(config.workspace_root.iterdir())
 
 
-@pytest.mark.parametrize("prompt", ["", " ", "bad\x00prompt", "read @/etc/passwd", "x" * 32001,
-    " /delegate do work", "& do work", "!id", "--allow-all"],
-    ids=["empty", "whitespace", "nul", "file-reference", "oversize", "slash-command", "delegate", "shell", "option"])
-async def test_invalid_prompt(config, prompt):
-    runner = CopilotRunner(config)
-    runner.capable = True
-    assert (await runner.run("standard", prompt)).status == "invalid_input"
+@pytest.mark.parametrize('prompt', ['', ' ', 'bad\x00prompt', 'read @/etc/passwd', 'x' * 32001,
+    ' /delegate do work', '& do work', '!id', '--allow-all'])
+async def test_invalid_prompt(config, factory, prompt):
+    runner = CopilotRunner(config, client_factory=factory)
+    assert (await runner.run('standard', prompt)).status == 'invalid_input'
     assert not config.workspace_root.exists()
 
 
 def test_configuration_fails_closed(config):
-    assert Config.from_env({}).auth_mode == "disabled"
-    for changes in ({"auth_mode": "multi_user"}, {"github_token": ""}, {"mcp_token": "short"},
-                    {"github_token": "ghp_classic"}, {"subject": "bad\nowner"},
-                    {"mcp_token": config.github_token}, {"allowed_tiers": ("bogus",)}):
-        with pytest.raises(ValueError):
-            replace(config, **changes)
-    assert config.github_token not in repr(config)
-    assert config.mcp_token not in repr(config)
+    assert Config.from_env({}).auth_mode == 'disabled'
+    for changes in ({'auth_mode': 'multi_user'}, {'github_token': ''}, {'mcp_token': 'short'},
+                    {'github_token': 'ghp_classic'}, {'subject': 'bad\nowner'},
+                    {'mcp_token': config.github_token}, {'allowed_tiers': ('bogus',)}):
+        with pytest.raises(ValueError): replace(config, **changes)
+    with pytest.raises(ValueError, match='obsolete'):
+        Config.from_env({'FUSION_COPILOT_BIN': 'copilot'})
+    assert config.github_token not in repr(config) and config.mcp_token not in repr(config)
 
 
-async def test_timeout_failure_output_cap_and_redaction(config, caplog):
-    runner = CopilotRunner(replace(config, timeout_seconds=1, max_output_bytes=1024))
+async def test_limits_redaction_and_tool_denial(config, factory, caplog):
+    runner = CopilotRunner(replace(config, timeout_seconds=1, max_output_bytes=1024), client_factory=factory)
     await runner.probe()
-    assert (await runner.run("standard", "sleep")).status == "timeout"
-    failed = await runner.run("high", "fail")
-    assert failed.status == "provider_error" and failed.exit_code == 7 and not failed.output
-    assert (await runner.run("standard", "overflow")).status == "output_limit"
-    assert (await runner.run("standard", "secrets")).output == "[REDACTED]"
+    for prompt, status in [('sleep', 'timeout'), ('fail', 'provider_error'),
+                           ('overflow', 'output_limit'), ('tools', 'tool_denied')]:
+        result = await asyncio.wait_for(runner.run('standard', prompt), 3)
+        assert result.status == status and not result.output
+        assert factory.clients[0].sessions[-1].aborted
+    assert (await runner.run('standard', 'secrets')).output == '[REDACTED]'
     assert config.github_token not in caplog.text
-    assert not list(config.workspace_root.iterdir())
+    await runner.close()
 
 
-@pytest.mark.parametrize("prompt", ["overflow", "overflow_stderr", "overflow_both"])
-async def test_full_pipes_are_discarded_before_process_wait(config, prompt):
-    runner = CopilotRunner(replace(config, max_output_bytes=1024, max_concurrency=1))
+async def test_concurrency_isolation_and_environment(config, factory, monkeypatch):
+    monkeypatch.setenv('GITHUB_TOKEN', 'parent-secret')
+    monkeypatch.setenv('COPILOT_PROVIDER_API_KEY', 'parent-bypass')
+    runner = CopilotRunner(config, client_factory=factory)
     await runner.probe()
-    # This used to hang on Linux after SIGKILL because wait() preceded pipe
-    # drainage. The independent deadline catches cleanup deadlocks promptly.
-    result = await asyncio.wait_for(runner.run("standard", prompt), timeout=3)
-    assert result.status == "output_limit"
-    assert not list(config.workspace_root.iterdir())
-    assert (await asyncio.wait_for(runner.run("standard", "hello"), timeout=3)).ok
+    a, b = await asyncio.gather(runner.run('standard', 'slow'), runner.run('max', 'slow'))
+    assert a.ok and b.ok
+    environment = factory.clients[0].options['environment']
+    assert not any(k in environment for k in ('GITHUB_TOKEN', 'COPILOT_PROVIDER_API_KEY', 'FUSION_MCP_TOKEN'))
+    assert config.github_token not in str(environment)
+    await runner.close()
 
 
-async def test_concurrency_isolation_and_environment(config, monkeypatch):
-    monkeypatch.setenv("GITHUB_TOKEN", "parent-secret")
-    monkeypatch.setenv("COPILOT_PROVIDER_API_KEY", "parent-bypass")
-    monkeypatch.setenv("BASH_ENV", "/unsafe")
-    runner = CopilotRunner(config)
+async def test_busy_cancel_and_next_request(config, factory):
+    runner = CopilotRunner(replace(config, max_concurrency=1), client_factory=factory)
     await runner.probe()
-    first, second = await asyncio.gather(runner.run("standard", "slow"), runner.run("max", "slow"))
-    a, b = json.loads(first.output), json.loads(second.output)
-    assert a["home"] != b["home"] and a["cwd"] != b["cwd"]
-    data = json.loads((await runner.run("high", "env")).output)
-    assert all(name not in data for name in ("GITHUB_TOKEN", "COPILOT_PROVIDER_API_KEY", "BASH_ENV", "FUSION_MCP_TOKEN"))
-
-
-async def test_busy_and_cancellation_reap_process_group(config):
-    runner = CopilotRunner(replace(config, max_concurrency=1))
-    await runner.probe()
-    task = asyncio.create_task(runner.run("standard", "child"))
-    child_pid = None
-    for _ in range(100):
-        pids = list(config.workspace_root.glob("*/home/pid"))
-        if pids:
-            child_pid = int(pids[0].read_text())
-            break
-        await asyncio.sleep(.02)
-    assert child_pid
-    assert (await runner.run("high", "hello")).status == "busy"
+    task = asyncio.create_task(runner.run('standard', 'sleep'))
+    while not factory.clients[0].sessions:
+        await asyncio.sleep(.01)
+    assert (await runner.run('high', 'hello')).status == 'busy'
     task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
+    with pytest.raises(asyncio.CancelledError): await task
+    assert factory.clients[0].sessions[0].aborted
+    assert (await runner.run('standard', 'hello')).ok
+    await runner.close()
+
+
+async def test_policy_and_capability_failure(config, factory):
+    runner = CopilotRunner(replace(config, allowed_tiers=('standard',)), client_factory=factory)
+    assert (await runner.run('max', 'hello')).status == 'access_denied'
+    assert (await runner.run('standard', 'hello')).status == 'not_checked'
+    def unsupported(**kwargs):
+        client = factory(**kwargs)
+        client.version = '0.0.1'
+        return client
+    runner = CopilotRunner(config, client_factory=unsupported)
+    await runner.probe()
+    assert runner.capability_status == 'unsupported_runtime' and not runner.capable
     assert not list(config.workspace_root.iterdir())
-    # A killed child can briefly be an init-owned zombie; either absent or
-    # zombie is evidence that it cannot keep running or retain its workspace.
-    if sys.platform.startswith("linux"):
-        # Minimal runtime containers need no procps package just for tests.
-        stat = Path(f"/proc/{child_pid}/stat")
-        try:
-            state = stat.read_text().rsplit(") ", 1)[1].split()[0]
-        except FileNotFoundError:
-            state = ""
-    else:
-        import subprocess
-        state = subprocess.run(["ps", "-o", "stat=", "-p", str(child_pid)],
-            capture_output=True, text=True).stdout.strip()
-    assert not state or state.startswith("Z")
-    assert (await runner.run("standard", "hello")).ok
 
 
-async def test_policy_and_missing_capabilities(config):
-    runner = CopilotRunner(replace(config, allowed_tiers=("standard",)))
-    assert (await runner.run("max", "hello")).status == "access_denied"
-    assert (await runner.run("standard", "hello")).status == "not_checked"
-    missing = CopilotRunner(replace(config, copilot_bin="/not-present/copilot"))
-    await missing.probe()
-    assert missing.capability_status == "cli_missing"
-    binary = config.copilot_bin
-    from pathlib import Path
-    Path(binary).write_text("#!/bin/sh\necho '--model'\n")
+async def test_disabled_never_starts(config, factory):
+    runner = CopilotRunner(replace(config, auth_mode='disabled'), client_factory=factory)
     await runner.probe()
-    assert runner.capability_status == "unsupported_cli"
-    assert (await runner.run("standard", "hello")).status == "unsupported_cli"
+    assert (await runner.run('standard', 'hello')).status == 'disabled'
+    assert not factory.clients and not config.workspace_root.exists()
 
 
-async def test_disabled_never_executes(config):
-    runner = CopilotRunner(replace(config, auth_mode="disabled"))
+async def test_dead_runtime_closes_admission(config, factory):
+    runner = CopilotRunner(config, client_factory=factory)
     await runner.probe()
-    assert (await runner.run("standard", "hello")).status == "disabled"
-    assert not config.workspace_root.exists()
+    async def broken():
+        raise ConnectionError('synthetic dead runtime')
+    factory.clients[0].ping = broken
+    assert not await runner.check_health()
+    assert (await runner.run('standard', 'hello')).status == 'runtime_unavailable'
+    assert not factory.clients[0].sessions
+    await runner.close()

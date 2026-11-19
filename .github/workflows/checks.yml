@@ -29,7 +29,7 @@ jobs:
           python-version: '3.11'
       - name: Install verified service and test dependencies
         run: python -m pip install --require-hashes -r services/fusion-mcp/requirements-dev.lock
-      - name: Run service tests with mocked Copilot
+      - name: Run service and independent security tests with mocked Copilot SDK
         working-directory: services/fusion-mcp
         run: timeout --kill-after=10s 120s python -m pytest -q -o faulthandler_timeout=30
   terraform:
@@ -54,5 +54,22 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - name: Build the production Fusion container
         run: docker build --tag fusion-mcp:local services/fusion-mcp
+      - name: Probe the real SDK runtime without network access
+        run: >-
+          timeout --kill-after=10s 90s docker run --rm --network none --read-only --tmpfs /tmp
+          --mount type=bind,src="$PWD/tests/integration/offline_probe.py",dst=/qa/offline_probe.py,readonly
+          fusion-mcp:local python /qa/offline_probe.py
+      - name: Verify real SDK text and client-tool contracts with a local provider
+        run: >-
+          timeout --kill-after=10s 90s docker run --rm --network none --read-only --tmpfs /tmp
+          --env PYTHONPATH=/app
+          --mount type=bind,src="$PWD/services/fusion-mcp/tests/runtime_contract_probe.py",dst=/qa/runtime_contract_probe.py,readonly
+          fusion-mcp:local python /qa/runtime_contract_probe.py
+      - name: Verify pinned LiteLLM fallback hooks and credential isolation
+        run: >-
+          timeout --kill-after=10s 120s docker run --rm --network none --entrypoint python
+          --mount type=bind,src="$PWD/services/litellm-fusion-guard",dst=/qa,readonly
+          ghcr.io/berriai/litellm:v1.108.0@sha256:c560d317136880ea92d62334d4367ab10955b1af189dd3ea24f6551290b1d6c1
+          /qa/check_runtime.py
       - name: Test the pinned gateway with synthetic providers
         run: python3 tests/integration/run.py

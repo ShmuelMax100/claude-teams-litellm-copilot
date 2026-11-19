@@ -30,6 +30,12 @@ variable "enable_fusion_mcp" {
   default = false
 }
 
+variable "enable_fusion_fallback" {
+  description = "Explicitly enable the single-owner guarded native Fusion fallback adapter. Requires enable_fusion_mcp; model/key fallback enrollment remains a separate administrator action."
+  type        = bool
+  default     = false
+}
+
 variable "enable_managed_postgresql" {
   type    = bool
   default = true
@@ -200,13 +206,45 @@ variable "fusion_memory" {
 }
 
 variable "fusion_min_replicas" {
-  type    = number
-  default = 0
+  description = "Keep the SDK runtime warm when Fusion is explicitly enabled. One replica incurs ongoing idle/active charges; set 0 to permit cold starts and scale-to-zero. Fusion remains disabled by default."
+  type        = number
+  default     = 1
 }
 
 variable "fusion_max_replicas" {
-  type    = number
-  default = 1
+  description = "Per-replica SDK runtimes are independent. The single-user deployment defaults to one replica."
+  type        = number
+  default     = 1
+}
+
+variable "fusion_timeout_seconds" {
+  description = "SDK tool execution deadline. At most 210 seconds leaves transport/cleanup margin below ACA's 240-second HTTP ingress request timeout."
+  type        = number
+  default     = 120
+  validation {
+    condition     = var.fusion_timeout_seconds >= 1 && var.fusion_timeout_seconds <= 210 && floor(var.fusion_timeout_seconds) == var.fusion_timeout_seconds
+    error_message = "Fusion execution timeout must be an integer from 1 through 210 seconds for ACA HTTP ingress."
+  }
+}
+
+variable "fusion_primary_timeout_seconds" {
+  description = "Anthropic primary attempt deadline when guarded fallback is enabled. Primary + Fusion execution + 20 seconds of fallback transport must fit within 230 seconds, leaving ACA ingress overhead."
+  type        = number
+  default     = 60
+  validation {
+    condition     = var.fusion_primary_timeout_seconds >= 1 && var.fusion_primary_timeout_seconds <= 180 && floor(var.fusion_primary_timeout_seconds) == var.fusion_primary_timeout_seconds
+    error_message = "Fusion fallback primary timeout must be an integer from 1 through 180 seconds."
+  }
+}
+
+variable "fusion_max_concurrency" {
+  description = "Maximum concurrent isolated SDK sessions per replica, also used as the HTTP autoscaling target. This does not authorize additional users."
+  type        = number
+  default     = 2
+  validation {
+    condition     = var.fusion_max_concurrency >= 1 && var.fusion_max_concurrency <= 16 && floor(var.fusion_max_concurrency) == var.fusion_max_concurrency
+    error_message = "Fusion concurrency must be an integer from 1 through 16."
+  }
 }
 
 variable "registry_server" {

@@ -15,10 +15,12 @@ class Config:
     allowed_tiers: tuple[str, ...] = ("standard", "high", "max")
     timeout_seconds: int = 120
     max_input_chars: int = 32000
+    enable_fallback: bool = False
+    max_context_chars: int = 262144
     max_output_bytes: int = 262144
     max_concurrency: int = 2
     workspace_root: Path = Path("/tmp/fusion")
-    copilot_bin: str = "copilot"
+    copilot_bin: str = "/opt/copilot-runtime/copilot-runtime"
     port: int = 8080
 
     def __post_init__(self):
@@ -27,6 +29,7 @@ class Config:
         if not self.allowed_tiers or not set(self.allowed_tiers) <= {"standard", "high", "max"}:
             raise ValueError("Invalid Fusion allowed tiers.")
         bounds = {"timeout_seconds": (1, 1800), "max_input_chars": (1, 100000),
+                  "max_context_chars": (1000, 1000000),
                   "max_output_bytes": (128, 4194304), "max_concurrency": (1, 16),
                   "port": (1024, 65535)}
         for name, (low, high) in bounds.items():
@@ -45,14 +48,19 @@ class Config:
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None):
         env = os.environ if env is None else env
+        if "FUSION_COPILOT_BIN" in env:
+            raise ValueError("FUSION_COPILOT_BIN is obsolete; set FUSION_RUNTIME_PATH to the SDK runtime bundle.")
+        if env.get("FUSION_ENABLE_FALLBACK", "false") not in ("true", "false"):
+            raise ValueError("FUSION_ENABLE_FALLBACK must be true or false.")
         values = {"auth_mode": env.get("FUSION_AUTH_MODE", "disabled"),
                   "subject": env.get("FUSION_SINGLE_USER_SUBJECT", ""),
                   "github_token": env.get("FUSION_GITHUB_TOKEN", ""),
                   "mcp_token": env.get("FUSION_MCP_TOKEN", ""),
+                  "enable_fallback": env.get("FUSION_ENABLE_FALLBACK", "false") == "true",
                   "allowed_tiers": tuple(env.get("FUSION_ALLOWED_TIERS", "standard,high,max").split(",")),
                   "workspace_root": Path(env.get("FUSION_WORKSPACE_ROOT", "/tmp/fusion")),
-                  "copilot_bin": env.get("FUSION_COPILOT_BIN", "copilot")}
-        for key in ("timeout_seconds", "max_input_chars", "max_output_bytes", "max_concurrency", "port"):
+                  "copilot_bin": env.get("FUSION_RUNTIME_PATH", "/opt/copilot-runtime/copilot-runtime")}
+        for key in ("timeout_seconds", "max_input_chars", "max_context_chars", "max_output_bytes", "max_concurrency", "port"):
             if "FUSION_" + key.upper() in env:
                 try:
                     values[key] = int(env["FUSION_" + key.upper()])

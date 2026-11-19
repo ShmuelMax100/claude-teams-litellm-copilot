@@ -383,7 +383,7 @@ def uninstall(home=None):
 
 def run_tool(invite, tier, prompt, allow_live_usage=False):
     if not allow_live_usage:
-        raise Error('Live Fusion execution consumes provider usage; explicitly set --allow-live-usage.')
+        raise Error('Live Fusion execution consumes Copilot usage, independently of Claude Team; explicitly set --allow-live-usage.')
     if tier not in ('standard', 'high', 'max') or not isinstance(prompt, str) or not prompt.strip():
         raise Error('Choose a supported tier and a non-empty prompt.')
     discover(invite)
@@ -397,7 +397,14 @@ def run_tool(invite, tier, prompt, allow_live_usage=False):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(prog='./setup fusion', description=__doc__)
+    selected = list(sys.argv[1:] if argv is None else argv)
+    if selected and selected[0].startswith('fallback-'):
+        import fusion_fallback
+        return fusion_fallback.main(selected)
+    parser = argparse.ArgumentParser(prog='./setup fusion', description=__doc__,
+        epilog='Automatic Claude-primary fallback: fallback-register, fallback-enroll, '
+               'fallback-connect, fallback-doctor, fallback-restore. Use COMMAND --help '
+               'or see docs/FUSION-FALLBACK.md.')
     commands = parser.add_subparsers(dest='command', required=True)
     register_parser = commands.add_parser('register', help='Preview or apply a single-user MCP registration')
     register_parser.add_argument('--gateway', required=True)
@@ -420,7 +427,7 @@ def main(argv=None):
         command = commands.add_parser(name, help='Discover authorized tools without model usage')
         command.add_argument('--invite', type=Path)
     commands.add_parser('uninstall', help='Remove only this entry while preserving unrelated or later settings')
-    run = commands.add_parser('run', help='Explicit opt-in live execution (may incur usage)')
+    run = commands.add_parser('run', help='Explicit live Fusion tool call using Copilot entitlement')
     run.add_argument('--invite', type=Path)
     run.add_argument('--tier', required=True, choices=['standard', 'high', 'max'])
     run.add_argument('--prompt-file', required=True, type=Path)

@@ -1,12 +1,21 @@
 # Run from infra/terraform, copying this file to a protected local path.
 # This is a root-module variable set, not a separate Terraform deployment.
-subscription_id           = "00000000-0000-0000-0000-000000000000"
-name_prefix               = "litellm-dev"
-location                  = "westeurope"
-enable_fusion_mcp          = false
-enable_managed_postgresql  = true
-enable_private_networking = false
-litellm_min_replicas       = 1
-litellm_max_replicas       = 2
-postgresql_sku            = "B_Standard_B1ms"
-tags = { environment = "dev", owner = "platform-team" }
+subscription_id        = "00000000-0000-0000-0000-000000000000"
+name_prefix            = "litellm-dev"
+location               = "westeurope"
+enable_fusion_mcp      = false
+enable_fusion_fallback = false
+# If Fusion is explicitly enabled, the default keeps one warm SDK runtime and
+# incurs ongoing idle/active charges. Set fusion_min_replicas = 0 to trade first
+# request latency for scale-to-zero savings. No Fusion resource exists here.
+fusion_min_replicas            = 1
+fusion_max_replicas            = 1
+fusion_timeout_seconds         = 120
+fusion_primary_timeout_seconds = 60 # Fallback total: 60 + 120 + 20 = 200; max 230.
+fusion_max_concurrency         = 2
+enable_managed_postgresql      = true
+enable_private_networking      = false
+litellm_min_replicas           = 1
+litellm_max_replicas           = 2
+postgresql_sku                 = "B_Standard_B1ms"
+tags                           = { environment = "dev", owner = "platform-team" }

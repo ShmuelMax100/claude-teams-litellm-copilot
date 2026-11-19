@@ -231,7 +231,7 @@ class Wizard:
         self.ui.note('Registration and a separate MCP-only invitation require administrator approval.')
         self.ui.note('./setup fusion --help')
         self.ui.note('Only the registered single-user owner can enroll. Existing inference keys stay unchanged.')
-        self.ui.note('Tool discovery does not prove CLI Fusion support. See docs/FUSION-MCP.md.')
+        self.ui.note('Fusion calls use Copilot entitlement; discovery does not prove live access. See docs/FUSION-MCP.md.')
     def run(self,role=None):
         while True:
             try:

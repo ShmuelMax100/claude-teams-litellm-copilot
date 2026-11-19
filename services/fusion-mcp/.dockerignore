@@ -1,5 +1,9 @@
 *
 !Dockerfile
 !requirements.lock
+!requirements-build.lock
+!scripts/
+!scripts/build_sdk.py
+!scripts/stage_runtime.py
 !src/
 !src/*.py

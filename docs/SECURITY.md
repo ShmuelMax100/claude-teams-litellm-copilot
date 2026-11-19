@@ -9,7 +9,7 @@ are unchanged. Copilot-only mode still requires its file-managed per-user
 authentication marker and native no-fallback key policy.
 
 Fusion has a separate credential lifecycle. A LiteLLM OAuth connection is not a
-verified Copilot CLI credential and is never exported or reused for this service.
+verified Copilot SDK credential and is never exported or reused for this service.
 
 ## Supported Fusion mode
 
@@ -54,26 +54,51 @@ Permission behavior is version-specific. Tests exercise the pinned LiteLLM
 image with authorized, inference-only, ungranted and unauthenticated clients.
 Repeat these checks before upgrading or changing team/access-group policy.
 
+## Automatic fallback authorization
+
+Optional automatic fallback uses a **separate inference key**, restricted to the
+same configured owner, the existing Claude primary aliases and one Fusion tier.
+The guard initializes request state from authenticated key metadata, not body
+metadata or headers. Only an observed eligible transient primary failure before
+output can authorize one outbound request. Direct backup calls, other users,
+auth/input/policy failures and replay after output are denied.
+
+The fallback hop removes incoming provider credentials, HTTP clients, headers
+and proxy metadata, and replaces them with the independent service bearer and
+fixed private origin. LiteLLM receives read access to that bearer secret only,
+never the GitHub PAT. Guard removal while fallback aliases remain registered is
+unsafe: revoke fallback keys/aliases before removing the guard.
+
+The accepted handoff serializes text/tool history as context; it does not import
+native Claude reasoning/session state. Tool declarations have no SDK handlers.
+The service validates and returns complete tool calls to Claude Code after
+session cleanup. Tool permission decisions and side effects remain in Claude
+Code. Missing historical results, unsupported attachments and tool schemas with
+external references are rejected. See [the compatibility limits](FUSION-FALLBACK.md).
+
 ## Execution isolation
 
-- Each invocation gets a new temporary working directory, home and CLI config.
-  No developer repository, host home or Docker socket is mounted.
-- The subprocess receives an allowlisted environment with only its configured
-  GitHub credential. Ambient `GH_TOKEN`, `GITHUB_TOKEN`, provider keys and BYOK
-  routing settings are not inherited.
-- Tool input contains a bounded prompt only. Clients cannot choose executables,
-  paths, models, CLI flags, shell commands or environment variables.
-- All CLI tools and built-in MCP integrations are denied. Custom instructions
-  and auto-update are disabled. Missing required controls fail capability checks.
-- Time, input, output and concurrency are bounded. Cancellation and timeout
-  terminate the process group; temporary state is removed.
-- Startup checks CLI help/version only. Discovery and diagnostics do not incur
-  model usage. Live invocation requires an explicit operator action.
+- One SDK-managed native runtime uses a private home and minimal environment.
+  Each invocation gets a fresh session ID and working directory. No developer
+  repository, host home or Docker socket is mounted.
+- Only the explicit single-owner GitHub credential is supplied. Ambient
+  `GH_TOKEN`, `GITHUB_TOKEN`, provider keys and BYOK settings are not inherited;
+  logged-in-user discovery, memory, local instructions and skills are disabled.
+- Built-in tools are disabled. MCP calls expose no tools. Inference handoff
+  declares only the caller's functions, without execution handlers.
+- Time, input, output and concurrency are bounded. Timeout/cancellation aborts
+  and deletes session state before workspace release. Cleanup failure closes
+  admission and retires the runtime rather than silently reusing uncertain state.
+- Credential echoes in tool calls are rejected, not rewritten into executable
+  arguments. Text output is redacted; errors omit provider payloads.
+- Startup checks SDK protocol/process health without inference. Readiness and
+  discovery do not prove entitlement. The optional endpoint stays disabled until
+  explicitly configured; no model usage occurs in normal health probes.
 
-This service returns coding assistance as text; it is not a remote repository
-editor or a general-purpose shell. A container boundary and these controls are
-not a claim that arbitrary untrusted native software can safely share secrets.
-Run only reviewed, pinned artifacts and restrict administrator access.
+The service is not a remote repository editor or shell. Runtime isolation is not
+a claim that arbitrary native software can safely share secrets: run reviewed,
+pinned artifacts and restrict administrator access. The persistent runtime and
+static GitHub credential remain a single-owner boundary, not multi-user isolation.
 
 ## Secrets, storage and logs
 
@@ -95,14 +120,14 @@ still requires a bearer. Public LiteLLM ingress is HTTPS with key authentication
 private-only environments additionally require customer network connectivity.
 
 Fusion audit logs include generated request ID, configured subject, tool/tier,
-duration, result and CLI exit code. They do not intentionally contain prompt text,
+duration and result; the legacy exit-code field is nullable. They do not intentionally contain prompt text,
 provider output or tokens. Treat upstream and infrastructure logs according to
 the customer's code-privacy and retention policy. Do not enable request-body or
 debug logging for production troubleshooting without an approved data policy.
 
 ## Revocation and incident response
 
-1. Revoke the dedicated MCP key to stop client access without changing inference.
+1. Revoke the dedicated MCP and/or fallback inference key; keep ordinary keys intact.
 2. Disable the Fusion app or remove its registration if upstream isolation is in
    doubt. Retain evidence without publishing payloads or secrets.
 3. Revoke the GitHub PAT and rotate the independent service bearer when exposed.
@@ -110,7 +135,7 @@ debug logging for production troubleshooting without an approved data policy.
    Key Vault access and container-image provenance.
 5. Re-run negative authorization and isolation tests before restoring access.
 
-Local MCP uninstall only removes the installed client registration. It does not
+Local MCP uninstall or fallback restore only changes client settings. It does not
 revoke a gateway key or a GitHub token.
 
 ## References

@@ -7,11 +7,12 @@ Optional hosting and tools: [deploy LiteLLM on Azure](docs/AZURE-DEPLOYMENT.md),
 [integration architecture](docs/ARCHITECTURE.md) and [security boundaries](docs/SECURITY.md).
 The [implementation report](docs/IMPLEMENTATION-RESULTS.md) lists delivered files,
 test evidence, manual setup steps and production limitations.
-Fusion is disabled by default. **The verified official Copilot CLI 1.0.114 lacks
-`--fusion-tier`; the shipped service refuses live execution with
-`unsupported_cli`.** The documented mapping is tested with mocks. An audited
-supported CLI build is required before activation; no Azure deployment or live
-Fusion inference was performed.
+Fusion is disabled by default. The optional service runs **Copilot SDK 2.0.1**
+inside its Container App with a warm, isolated native runtime. A separately
+enrolled owner can use [Claude primary with automatic Fusion fallback](docs/FUSION-FALLBACK.md):
+conversation history becomes context for a fresh task, and Claude Code executes
+tools locally. Fusion uses Copilot entitlement. Local SDK/container checks pass;
+no Azure deployment or live Fusion inference was performed.
 
 **One onboarding flow. Personal provider identities. Automatic fallback at the gateway.**
 
@@ -127,13 +128,14 @@ No special launcher is needed after joining. The wizard updates `~/.claude/setti
 3. On an eligible failure, LiteLLM applies that key’s fallback mapping and uses the developer’s Copilot connection.
 4. Claude Code receives the response through the same gateway. LiteLLM Logs identify the actual provider, model and fallback attempts.
 
-This uses native LiteLLM routes, credentials and key-level router settings. There is no custom request adapter or modified LiteLLM container image in the package. The architecture covers Claude Teams as the primary provider and GitHub Copilot as the backup provider.
+The default path uses native LiteLLM routes, credentials and key-level router settings with the official gateway image. It covers Claude Teams as primary and personal GitHub Copilot as backup.
 
-Optional Fusion uses a separate Claude Code MCP registration through LiteLLM
-`/mcp` and a dedicated MCP-only key. It does not replace model routing or reuse
-the existing provider OAuth credential. The first implementation supports only
-an explicitly declared single-user POC, with an internal authenticated service.
-See the [extended architecture and contracts](docs/ARCHITECTURE.md).
+Optional Fusion adds a private SDK service and two separately enrolled modes:
+MCP tools through LiteLLM `/mcp`, or automatic Claude-primary fallback through an
+owner-bound guard and context adapter. Both are disabled by default and support
+one declared owner. Existing provider OAuth is never reused by the SDK.
+See [automatic fallback](docs/FUSION-FALLBACK.md) and the
+[extended architecture](docs/ARCHITECTURE.md).
 
 ## Models and fallback policy
 
@@ -206,8 +208,9 @@ The guide build uses only checked-in sources and embeds the diagram PNGs. Automa
 | `diagrams/` | Three architecture PNGs used in this README and guide |
 | `tests/` | Offline tests |
 | `infra/terraform/` | Optional Azure resources, variables and mocked plan tests |
-| `services/fusion-mcp/` | Optional isolated single-user MCP service and container |
-| `tests/integration/` | Fresh local gateway tests with a mock CLI; no provider usage |
+| `services/fusion-mcp/` | Optional single-owner SDK service, MCP and inference adapter |
+| `services/litellm-fusion-guard/` | Optional owner-bound automatic fallback policy |
+| `tests/integration/` | Fresh local gateway tests with a mock SDK; no provider usage |
 | `docs/AZURE-DEPLOYMENT.md`, `docs/FUSION-MCP.md` | Optional deployment and tool setup |
 | `docs/ARCHITECTURE.md`, `docs/SECURITY.md` | Service contracts, ownership and identity boundaries |
 | `HANDOFF-TEMPLATE.txt` | Private delivery instructions |

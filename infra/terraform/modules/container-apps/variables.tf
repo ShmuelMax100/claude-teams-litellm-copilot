@@ -78,6 +78,15 @@ variable "enable_fusion" {
   type = bool
 }
 
+variable "enable_fusion_fallback" {
+  type = bool
+}
+
+variable "fusion_guard_source" {
+  description = "Checked-in nonsecret guard source; mounted only for explicitly enabled fallback."
+  type        = string
+}
+
 variable "fusion_identity_id" {
   type = string
 }
@@ -111,6 +120,18 @@ variable "fusion_min_replicas" {
 }
 
 variable "fusion_max_replicas" {
+  type = number
+}
+
+variable "fusion_timeout_seconds" {
+  type = number
+}
+
+variable "fusion_primary_timeout_seconds" {
+  type = number
+}
+
+variable "fusion_max_concurrency" {
   type = number
 }
 

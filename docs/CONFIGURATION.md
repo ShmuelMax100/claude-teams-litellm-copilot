@@ -115,11 +115,17 @@ The default wizard and existing configurations retain their behavior.
 | MCP client | Dedicated private invitation/key; one user-scoped Claude MCP registration |
 
 Fusion does not change `_engine/catalog.json`, provider credential definitions or
-fallback policies. Its separate key has explicit server permissions and no
-inference models. GitHub CLI authentication uses a separately provisioned
-user-owned PAT, never the existing LiteLLM OAuth connection. Read
-[security boundaries](SECURITY.md) before enabling the POC.
+existing invitation formats. MCP enrollment grants no inference models. The
+separate automatic fallback invitation creates a new owner-bound inference key;
+existing keys retain their policies. SDK authentication uses a separately
+provisioned fine-grained PAT and never reuses personal Copilot OAuth.
 
-Current CLI 1.0.114 lacks the documented Fusion flag. The service checks this
-and refuses execution; neither successful MCP discovery nor a container build
-proves live Fusion availability.
+`enable_fusion_fallback=false` is the Terraform default. When enabled it mounts
+`fusion_fallback_guard.py`, configures its callback and supplies owner, private
+API base, independent service bearer and bounded deadlines. The SDK endpoint
+also requires `FUSION_ENABLE_FALLBACK=true`. See [the full configuration and
+onboarding contract](FUSION-FALLBACK.md). Merely adding a model without the guard
+is insufficient. No global LiteLLM Messages conversion flag is changed.
+
+Readiness verifies local SDK/runtime health. Neither readiness nor tool discovery
+proves live Fusion entitlement or billing behavior.

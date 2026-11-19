@@ -25,12 +25,13 @@ that routes and personal connections survive restart before broader enrollment.
 
 ## Optional Fusion POC
 
-The available CLI 1.0.114 lacks `--fusion-tier`; activation is blocked until a
-reviewed supported binary passes capability checks. See [Fusion](FUSION-MCP.md).
-Do not enable shared execution for a team. This implementation supports one
-explicit owner, with a separate user-owned GitHub PAT and MCP bearer.
+The service uses the Copilot SDK inside a private Container App. Local runtime
+checks have passed; live entitlement and Azure readiness still require operator
+validation. See [Fusion MCP](FUSION-MCP.md) and
+[Claude-primary automatic fallback](FUSION-FALLBACK.md).
 
-After that prerequisite is resolved:
+Do not enable shared execution for a team. This implementation supports one
+explicit owner, with a separate user-owned GitHub PAT and service bearer.
 
 1. Identify one existing LiteLLM user ID and verify the GitHub PAT belongs to
    that person. Configure the same service owner; do not trust request headers.
@@ -40,6 +41,12 @@ After that prerequisite is resolved:
 4. Enroll only that owner with a new MCP-only key and deliver its private Fusion
    invitation. Leave all inference invitations and permissions intact.
 5. Verify discovery and unauthorized-key rejection before any opt-in model call.
+
+For automatic fallback, enable the service adapter and pinned LiteLLM guard,
+then use `fallback-register` and `fallback-enroll`. This issues a separate
+inference invitation for the owner and chosen tier; MCP-only enrollment is not
+automatic fallback. The guard accepts only eligible primary failures before
+output. It never transfers Claude credentials to Fusion.
 
 On an existing gateway, inspect all keys, teams/access groups and server grants
 before attaching a static-bearer service. A dedicated single-user POC gateway is

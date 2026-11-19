@@ -4,10 +4,10 @@ Existing gateway users can continue with `./setup admin`; they do not need Azure
 or Terraform. This guide creates a new gateway with the repository's audited
 official LiteLLM 1.108.0 image. Fusion is optional and disabled by default.
 
-**Current Fusion blocker:** the verified official Copilot CLI 1.0.114 lacks
-`--fusion-tier`. Leave Fusion disabled until an audited compatible binary is
-available. The service intentionally fails readiness/execution with that pin;
-the optional infrastructure and mocked integration are still testable.
+The optional service uses Copilot SDK 2.0.1 and its bundled native runtime.
+Local SDK startup is verified; live entitlement/inference and Azure deployment
+remain separate operator checks. See [automatic fallback](FUSION-FALLBACK.md)
+for the accepted Claude-primary context handoff.
 
 ## Before deployment
 
@@ -105,6 +105,10 @@ cannot replace the explicit per-user marker required by the pinned version.
 | `enable_managed_postgresql` | `true` | Create private PostgreSQL Flexible Server |
 | `enable_private_networking` | `false` | Make the entire ACA environment internal when enabled |
 | `enable_fusion_mcp` | `false` | Add the single-user Fusion app after its prerequisites are supplied |
+| `enable_fusion_fallback` | `false` | Enable private inference handoff and mount the LiteLLM guard; requires Fusion |
+| `fusion_min_replicas` | `1` | Warm runtime when Fusion is enabled; `0` permits cold starts |
+| `fusion_timeout_seconds` | `120` | Task deadline, at most `210` in Azure |
+| `fusion_primary_timeout_seconds` | `60` | Primary deadline for the optional fallback route |
 | `subscription_id` | required | Operator-selected subscription |
 | `name_prefix` | required | 3–16 lowercase characters; start with a letter, end with a letter/digit |
 | `location` | `westeurope` | Region; verify subscription availability |
@@ -161,16 +165,27 @@ LiteLLM administrator workflow; developer machines connect to LiteLLM `/mcp`,
 not directly to the private service. For a private ACR, supply `registry_server`
 and `registry_resource_id` for managed-identity pull access.
 
-Readiness checks configuration and local CLI support without inference. A CLI
-without verified Fusion flags intentionally returns not-ready and cannot serve
-model calls. A successful container build alone does not establish Fusion
-availability, account entitlement or enterprise policy.
+Readiness checks local SDK process/protocol health without inference. It does
+not establish Fusion availability, account entitlement or enterprise policy.
+The enabled service defaults to one warm replica (maximum one), with a separate
+startup allowance, process liveness and SDK readiness. Set minimum replicas to
+zero only when cold-start latency is acceptable. Warm capacity incurs idle cost.
 
-ACA HTTP ingress has a 240-second request deadline. Keep Fusion's execution
-timeout below that deadline with room for gateway/cold-start overhead. The
-defaults are 120 seconds in the service and 150 seconds in MCP registration.
-The standalone service's configurable 1800-second maximum is **not** supported
-end to end through this ACA HTTP path.
+For automatic fallback also set `enable_fusion_fallback=true`. Terraform mounts
+the checked-in guard source in the LiteLLM container, adds its callback to the
+configuration and sets the owner/private API base/budgets. Source changes trigger
+a new revision. LiteLLM gets Key Vault read access to the independent MCP service
+bearer **only**, never the GitHub PAT. Secret references resolving to the same
+secret scope are rejected. Enroll the owner using the separate
+[fallback commands](FUSION-FALLBACK.md) after the reviewed deployment is healthy.
+
+ACA HTTP ingress has a 240-second request deadline. MCP defaults are 120 seconds
+in the service and 150 seconds in MCP registration. Automatic fallback reserves
+60 seconds for the primary and `fusion_timeout_seconds + 20` for the adapter
+(default 140). Terraform and the guard reject combined budgets over 230 seconds,
+leaving ingress overhead. The standalone service's 1800-second maximum is not
+supported through this Azure HTTP path. Limits do not guarantee fast responses:
+networking, failure detection, cleanup and generation still take time.
 
 ## Recovery, upgrades and costs
 
@@ -187,7 +202,8 @@ database migrations; use the vendor-supported recovery path when schemas change.
 Never rotate the salt casually to fix an upgrade problem.
 
 To disable Fusion, revoke its dedicated keys/remove the optional registration,
-then set `enable_fusion_mcp=false`, review the plan and apply it. The plan should
+then set both `enable_fusion_fallback=false` and `enable_fusion_mcp=false`,
+review the plan and apply it. The plan should
 remove only Fusion resources and related permissions while retaining LiteLLM
 and its database. Local client uninstall is separate from access revocation.
 

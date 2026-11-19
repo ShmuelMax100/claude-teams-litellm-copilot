@@ -4,21 +4,30 @@ Fusion adds MCP tools alongside the existing LiteLLM model gateway. It does not
 change Claude subscription routing, personal Copilot fallback or copilot-only
 mode. No Fusion configuration or access is added by default.
 
-## Current support boundary
+## SDK support boundary
 
-**Live Fusion is blocked by the available CLI.** GitHub documents
-`copilot --model fusion --fusion-tier standard|high|max -p ...`, but the official
-checksum-verified **Copilot CLI 1.0.114** inspected on 19 November 2026 does not
-advertise `--fusion-tier`. The service pins that reviewed release and checks
-required capabilities locally. It returns `unsupported_cli` without a model
-request when support is absent; readiness returns 503. Liveness still succeeds.
+The server uses **Microsoft Copilot SDK 2.0.1** with its matching native runtime
+**1.0.114** inside the Container App. One SDK-managed stdio runtime stays warm;
+every call gets a fresh session. Fusion tiers are SDK session configuration,
+not CLI flags assembled per request. The runtime is still required by the SDK,
+but no interactive CLI installation or login is needed in Claude Code.
 
-The implementation includes real Streamable HTTP transport, authenticated tool
-discovery, isolated execution and the documented command mapping. Automated
-tests use a mock CLI. They do not establish live GitHub support, account
-entitlement or a working Azure Fusion deployment. Upgrade to a reviewed binary
-that passes capability checks before activating live use. Never remove the
-check, enable an undocumented feature flag or silently substitute another model.
+Both Linux architectures passed real local SDK startup and isolated mock-provider
+contract checks. These checks do not establish live GitHub entitlement, Fusion
+model selection, billing or Azure deployment. Readiness verifies the local
+protocol and process only. Earlier CLI help checks did not establish whether
+Fusion worked through the SDK and are no longer the capability gate.
+
+The container builds the SDK from checksum-pinned official v2.0.1 source because
+the published wheel CDN was inaccessible in this environment. Build provenance
+is retained at `/app/sdk-provenance.json`; the source-built wheel is not claimed
+to be byte-identical to the published wheel. Native runtime bundles and dependency
+artifacts are pinned and verified during the image build. Requests never download
+executable assets.
+
+For Claude-primary **automatic fallback**, use the separate
+[fallback guide](FUSION-FALLBACK.md). An MCP tool by itself does not implement
+model fallback. Both optional endpoints share the same owner and SDK service.
 
 ## Tools and policy
 
@@ -30,9 +39,8 @@ check, enable an undocumented feature flag or silently substitute another model.
 
 Each tool accepts only a `prompt` string. The service returns structured result
 metadata and bounded text. It does not mount repositories, execute arbitrary
-shell commands or permit the CLI to use coding tools. Supply only text you are
-authorized to send to GitHub. File-reference syntax is restricted to prevent
-CLI-side prompt expansion.
+shell commands or permit the SDK to use coding tools. Supply only text you are
+authorized to send to GitHub. The SDK receives text directly, without CLI prompt/file expansion.
 
 These tiers express effort, not fixed model assignments. A customer might aim
 to use cost-effective supported GPT/MAI Code models for Standard and stronger
@@ -51,7 +59,7 @@ account, rollout and platform. Do not infer permission from successful discovery
 Only an explicitly declared single-user POC is supported. Shared multi-user
 execution is disabled. Use the intended user's **user-owned fine-grained PAT**
 with **Copilot Requests**, supplied securely through Key Vault in Azure.
-Existing LiteLLM Copilot OAuth is independent and is never reused by the CLI.
+Existing LiteLLM Copilot OAuth is independent and is never reused by this runtime.
 
 Set `FUSION_SINGLE_USER_SUBJECT` to the one existing LiteLLM user ID. Verify the
 GitHub PAT owner separately. The same subject must be recorded in gateway
@@ -63,8 +71,8 @@ Keep three credentials separate:
 
 1. The developer's dedicated LiteLLM MCP key authenticates to the gateway.
 2. `FUSION_MCP_TOKEN` authenticates the gateway to the private service.
-3. `FUSION_GITHUB_TOKEN` is passed only to that user's CLI subprocess as
-   `COPILOT_GITHUB_TOKEN`.
+3. `FUSION_GITHUB_TOKEN` is supplied explicitly to the isolated SDK runtime.
+   Ambient GitHub/provider credentials and logged-in-user discovery are disabled.
 
 Do not share any of them across developers. Never use the LiteLLM master key as
 a client MCP key. Revoke MCP access separately from existing inference access.
@@ -83,13 +91,15 @@ a client MCP key. Revoke MCP access separately from existing inference access.
 | `FUSION_MAX_OUTPUT_BYTES` | `262144` |
 | `FUSION_MAX_CONCURRENCY` | `2` |
 | `FUSION_WORKSPACE_ROOT` | `/tmp/fusion` |
-| `FUSION_COPILOT_BIN` | `copilot`; administrator-controlled executable |
+| `FUSION_RUNTIME_PATH` | `/opt/copilot-runtime/copilot-runtime`; reviewed native bundle |
+| `FUSION_ENABLE_FALLBACK` | `false`; separately enables the private inference adapter |
+| `FUSION_MAX_CONTEXT_CHARS` | `262144`; combined fallback context and tools |
 | `FUSION_PORT` | `8080` |
 
 The HTTP endpoints are `/mcp`, `/health/live` and `/health/ready`. Health checks
-do not send inference. Authentication precedes MCP processing. Each invocation
-gets a new temporary home/workspace and an allowlisted environment; timeout or
-cancellation terminates the process group. Prompt, output and secrets are
+do not send inference. Authentication precedes MCP processing. One isolated runtime has a private home and minimal environment. Each invocation
+gets a new session/workspace; timeout or cancellation aborts/deletes that session.
+Cleanup failure closes admission and retires the runtime before reuse. Prompt, output and secrets are
 excluded from audit logs. Do not enable debug/body logging to diagnose payloads.
 
 Build the service locally:
@@ -127,7 +137,7 @@ It explicitly authorizes the server and identity-check routes, and disables
 inference models. Existing invitation keys keep their permissions. The separate
 private Fusion invitation must be delivered only to its intended owner.
 
-Example operator commands, once a supported CLI image is available (replace
+Example operator commands, after the reviewed SDK service is deployed (replace
 the example URLs and identifiers; secrets are entered at hidden prompts):
 
 ```sh
@@ -180,11 +190,11 @@ stored in the private local client configuration; protect it like an invitation.
 Start with health/readiness and MCP initialize/list-tools. Tool discovery is
 not execution, entitlement or provider-routing proof. The normal doctor/list
 checks send no model request. Live Standard/Max invocation is explicitly opt-in
-and may consume Copilot usage; only attempt it after CLI support and account
+and may consume Copilot usage; only attempt it after local readiness and account
 policy are confirmed.
 
 Before enabling any live use, test unauthenticated requests, an inference-only
-key and an ungranted MCP key. None should invoke the upstream CLI. Test timeouts,
+key and an ungranted MCP key. None should invoke the upstream SDK. Test timeouts,
 provider failures and denied tiers independently; failures must not fall back
 to the inference gateway or another user's credential.
 
@@ -199,8 +209,8 @@ remove only Fusion.
 
 - [GitHub Fusion model selection and tiers](https://docs.github.com/en/copilot/how-tos/copilot-cli/use-copilot-cli/choose-a-model)
 - [GitHub CLI 1.0.114 release](https://github.com/github/copilot-cli/releases/tag/v1.0.114)
-- [Reported CLI capability mismatch](https://github.com/github/copilot-cli/issues/5298)
+- [Pinned SDK source and architecture](https://github.com/microsoft/copilot-sdk/tree/v2.0.1)
 - [GitHub authentication](https://docs.github.com/en/copilot/how-tos/copilot-cli/set-up-copilot-cli/authenticate-copilot-cli)
 - [GitHub programmatic CLI reference](https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-programmatic-reference)
-- [GitHub tool controls](https://docs.github.com/en/copilot/how-tos/copilot-cli/use-copilot-cli/allowing-tools)
+- [SDK session configuration](https://github.com/microsoft/copilot-sdk/blob/v2.0.1/python/copilot/types.py)
 - [LiteLLM MCP endpoint and headers](https://docs.litellm.ai/docs/mcp_config_reference)

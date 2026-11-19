@@ -1,169 +1,92 @@
-# Azure and optional Fusion implementation results
+# Azure and optional SDK Fusion implementation results
 
 19 November 2026 · feature branch `codex/azure-fusion-mcp`
 
-## Delivered architecture
+## Delivered behavior
 
-The existing LiteLLM inference gateway, personal provider authentication and
-fallback policies remain the default. Optional Terraform provisions the pinned
-official LiteLLM 1.108.0 image on Azure Container Apps with private PostgreSQL,
-Key Vault, managed identities, HTTPS, monitoring and configurable scaling.
-Existing PostgreSQL and private-only gateway modes are supported.
+The established Claude Team subscription path remains primary. Ordinary
+onboarding, existing invitations, the model catalog and personal Copilot fallback
+retain their defaults. A separate owner-bound invitation opts into automatic
+native Copilot Fusion fallback after eligible transient failures before output.
+Fusion uses Copilot entitlement and cannot redirect its internal Claude calls to
+Claude Team credits or guarantee a particular MAI/Claude model.
 
-Fusion is a separate authenticated Streamable HTTP service with three
-prompt-only tools. It is disabled by default and supports only an explicitly
-declared single-owner POC. Dedicated MCP-only keys preserve inference-key
-permissions. The client installer preserves other settings, backs up private
-state, supports repeat installation and removes only its own entry.
+Optional Terraform hosts the pinned official LiteLLM 1.108.0 image on Azure
+Container Apps with private PostgreSQL, Key Vault, separate managed identities,
+HTTPS and monitoring. Existing-database and private-only gateway modes remain
+available. Fusion and its inference adapter are disabled by default.
 
-**External blocker:** checksum-verified Copilot CLI 1.0.114 lacks the documented
-`--fusion-tier` flag on both tested Linux architectures. Production execution
-therefore fails closed as `unsupported_cli`, with readiness 503. The service
-does not substitute a model or use undocumented flags. Mock-backed tests verify
-the command mapping and transport; live Fusion is not claimed to work.
+The private service runs Microsoft Copilot SDK 2.0.1 and matching native runtime
+1.0.114. One warm runtime creates isolated sessions. MCP exposes three existing
+prompt-only tools. The separate inference adapter gives a new Fusion task the
+conversation history as context. Tools have no server handlers; complete validated
+calls return to Claude Code for local execution after SDK session cleanup.
+
+The LiteLLM guard allows one eligible fallback, binds it to the authenticated
+owner key, denies direct backup access and replay after output, and removes
+primary/provider credentials from the private hop. No global Messages conversion
+setting is changed. The pinned gateway omits two policy fields on persistence;
+enrollment accepts only that verified normalization and the loaded guard enforces
+those limits on each request.
 
 ## Verification evidence
 
-| Check | Result |
+All checks below use synthetic credentials and isolated fixtures.
+
+| Check | Evidence |
 |---|---|
-| Existing baseline before changes | 44 unit tests passed |
-| Final repository unit suite | 84 passed, including existing tests |
-| Fusion service suite | 26 passed; Linux and macOS coverage |
-| Real gateway with synthetic CLI/providers | 10 integration groups passed, including persistence across gateway restart |
-| Terraform | Format, initialization, validation and 8 mocked plan scenarios passed |
-| Docker images | Linux ARM64 and AMD64 builds passed; non-root runtime |
-| Actual pinned CLI capability check | `unsupported_cli` verified with network disabled |
-| Guide and source distribution | Rebuild, Python/JSON/shell/JavaScript checks and public-content scan passed |
-| CI definition | Actionlint passed; offline, service, Terraform and Docker integration jobs added |
-| Independent reviews | Security/identity, Azure/cost and functional/regression reviews approved after fixes |
+| Repository unit suite | 104 tests passed, including existing onboarding |
+| Service suite | 90 passed on macOS, Linux ARM64 and Linux AMD64; includes 29 independent inference security cases |
+| Terraform | Formatting, validation and 16 mocked plans passed |
+| Docker | Latest Linux ARM64 and AMD64 production builds passed |
+| Actual SDK/runtime | Both architectures passed offline startup and mock-provider tool contract |
+| Pinned LiteLLM wire | 9 status scenarios passed; correct bearer, no synthetic caller/provider credential in headers or body |
+| Full gateway/PostgreSQL | 18 groups passed, including streaming/tool handoff and fallback after restart |
+| Independent reviews | Security, Azure and functional reviews found no remaining blockers after fixes |
+| Distribution | Guide rebuild, package/public scans, workflow lint and whitespace checks passed |
 
-The mock-backed integration uses the actual LiteLLM image and PostgreSQL with
-the actual MCP service, replacing only the CLI executable with a synthetic
-fixture. Provider egress is blocked. It checks native registration/enrollment,
-MCP handshake/discovery, unauthorized keys, three tiers, child environment
-isolation, error/redaction/recovery, settings preservation, database model APIs
-and existing fallback policy. Temporary containers and credentials are removed.
-Restart testing retains PostgreSQL and verifies model routes, MCP registration
-and dedicated-key grants without re-enrollment. The test-only Fusion companion
-reattaches to the gateway's recreated Docker network namespace after restart.
-No existing live pilot state or normal Claude profile is used.
+Two independent reviews reproduced a costly JSON Schema pattern blocking the
+service loop. Schema checks now run in credential-free, killable workers with
+wall-time, CPU, additional-allocation and concurrency limits. The Linux allocation
+budget is 256 MiB above the trusted interpreter baseline, supporting native and
+emulated builds without removing the memory bound. The reproduction terminates in
+about two seconds while the loop stays responsive and a subsequent validation
+succeeds. Another review found that a dead SDK process left the only replica
+unready indefinitely; fatal local runtime health/cleanup now fails liveness so
+ACA can restart it. Ordinary provider errors do not trigger this restart signal.
 
-Security review fixes include rejecting additive MCP access-group/toolset/tool
-grants on dedicated keys, rejecting malformed keys before HTTP diagnostics,
-strict tool argument/error contracts and aligned client/gateway execution
-timeouts. Bounded pipe drainage before process reaping prevents Linux output-limit
-cleanup deadlocks; separate stdout/stderr/combined saturation tests verify
-workspace and concurrency recovery. Legacy `admin.py`, `developer.py`, `copilot.py`, model catalog and the
-`setup` shell entry point remain byte-for-byte unchanged. The shared API helper
-only adds safe rejection of malformed credential headers.
+The SDK wheel is built from the official v2.0.1 release commit with verified
+source archive and matching runtime metadata because the wheel CDN was
+inaccessible locally. The image records source-build provenance; equivalence to
+the published wheel's bytes is not claimed. Native bundles and other dependencies
+are checksum-pinned. No executable asset is fetched during requests.
 
-## Remaining operator steps
+The legacy `admin.py`, `developer.py`, `copilot.py`, model catalog and `setup`
+entry point are unchanged relative to this PR's base.
 
-1. Review subscription/region, budgets, ownership tags and encrypted remote
-   Terraform state. Follow [Azure deployment](AZURE-DEPLOYMENT.md); review the
-   saved plan before any apply. No Azure deployment was performed here.
-2. Verify gateway readiness and database networking/migrations, retrieve the
-   master key privately from Key Vault, then use the existing `./setup admin`
-   and developer flow. Confirm provider entitlement and personal OAuth yourself.
-3. Leave Fusion disabled until a reviewed CLI build actually supports the
-   documented tier flag and all restrictive controls. Update its pin/checksums,
-   rerun tests, publish an approved AMD64 image and use its immutable digest.
-4. For the single-user POC, verify the user's fine-grained PAT ownership and
-   Copilot Requests permission. Enable CLI/model access through GitHub Enterprise
-   policies; do not assume LiteLLM OAuth can be reused.
-5. Store the PAT and independent MCP bearer securely, configure the same single
-   LiteLLM owner everywhere, preview/apply registration and issue a separate
-   MCP invitation. See [Fusion setup](FUSION-MCP.md).
-6. Verify negative access tests and discovery before separately approved live
-   Standard/Max prompts. Those calls can consume usage and were not run here.
+## Limits and remaining operator work
 
-## Production limitations and hardening
+- No Azure deployment, live Fusion inference, entitlement check, billing test or
+  production OAuth change was performed. Publish an approved AMD64 image, review
+  subscription/region/network/cost choices and an explicit Terraform plan before
+  any deployment. Verify identity roles, private DNS, image pulls and readiness.
+- Fusion is single-owner only. PAT ownership is administrator-attested; a static
+  service bearer is not delegated end-user identity. No shared-token team mode.
+- History is context for a fresh task, not native Claude session continuation.
+  Attachments and unsupported controls fail explicitly. Reasoning uses the
+  selected Fusion tier. Streaming is buffered before delivery.
+- Returned token limits conservatively bound UTF-8 bytes, not upstream compute or
+  billing. Complete tool calls must fit; usage is reported only when supplied by
+  the SDK. Schema validation can add bounded latency on tool-enabled handoffs.
+- A warm replica reduces cold starts and incurs idle cost. It cannot provide zero
+  latency. Default primary+fallback budget is 200 seconds, with a maximum 230
+  under ACA's 240-second ingress deadline.
+- Single replica and default database SKU are POC availability choices. Protect
+  Terraform state/plans, keep the encryption salt with database backups, rehearse
+  recovery and configure budgets/retention. Key Vault retains its RBAC-protected
+  public endpoint; private ACA does not make every Azure endpoint private.
 
-Multi-user Fusion delegation is not implemented. A static service bearer is not
-end-user identity; account mapping is administrator-attested. Audit all grants
-before attaching to a shared gateway. Future multi-user support needs verified
-per-user delegation and concurrent two-account isolation tests.
-
-Live Azure regional availability, role propagation, private DNS, image pulls,
-backup recovery and migrations remain operator validation. The guide documents
-safe re-plan/retry for initial Key Vault RBAC propagation. Terraform state holds
-generated secrets. The ACA Secret volume exposes app secrets to the same trusted
-LiteLLM container. Key Vault retains its RBAC-protected public endpoint.
-
-Configure production backup/restore drills, availability targets, private
-endpoints/network restrictions as required, log retention, cost alerts, image
-vulnerability review and controlled upgrades. ACA HTTP ingress has a 240-second
-deadline; keep service/gateway timeouts below it. No fixed cloud-cost estimate
-or exact Fusion per-model execution/cost claim is made.
-
-Detailed contracts, directory ownership and sources are in
-[architecture](ARCHITECTURE.md), [security](SECURITY.md) and
-[validation](VALIDATION.md). Deployment, administrator, developer and
-troubleshooting guides are linked from the README and updated standalone site.
-
-## Files created and modified
-
-| Change | File |
-|---|---|
-| Modified | [`.github/workflows/checks.yml`](../.github/workflows/checks.yml) |
-| Modified | [`.gitignore`](../.gitignore) |
-| Modified | [`README.md`](../README.md) |
-| Modified | [`START-HERE.html`](../START-HERE.html) |
-| Created | [`_engine/azure.py`](../_engine/azure.py) |
-| Modified | [`_engine/cli.py`](../_engine/cli.py) |
-| Created | [`_engine/fusion.py`](../_engine/fusion.py) |
-| Modified | [`_engine/gateway.py`](../_engine/gateway.py) |
-| Created | [`docs/ADMINISTRATOR.md`](../docs/ADMINISTRATOR.md) |
-| Created | [`docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md) |
-| Created | [`docs/AZURE-DEPLOYMENT.md`](../docs/AZURE-DEPLOYMENT.md) |
-| Modified | [`docs/CONFIGURATION.md`](../docs/CONFIGURATION.md) |
-| Created | [`docs/DEVELOPER.md`](../docs/DEVELOPER.md) |
-| Created | [`docs/FUSION-MCP.md`](../docs/FUSION-MCP.md) |
-| Created | [`docs/IMPLEMENTATION-RESULTS.md`](../docs/IMPLEMENTATION-RESULTS.md) |
-| Created | [`docs/SECURITY.md`](../docs/SECURITY.md) |
-| Created | [`docs/TROUBLESHOOTING.md`](../docs/TROUBLESHOOTING.md) |
-| Modified | [`docs/VALIDATION.md`](../docs/VALIDATION.md) |
-| Created | [`infra/terraform/.terraform.lock.hcl`](../infra/terraform/.terraform.lock.hcl) |
-| Created | [`infra/terraform/environments/dev/terraform.tfvars.example`](../infra/terraform/environments/dev/terraform.tfvars.example) |
-| Created | [`infra/terraform/main.tf`](../infra/terraform/main.tf) |
-| Created | [`infra/terraform/modules/container-apps/main.tf`](../infra/terraform/modules/container-apps/main.tf) |
-| Created | [`infra/terraform/modules/container-apps/variables.tf`](../infra/terraform/modules/container-apps/variables.tf) |
-| Created | [`infra/terraform/modules/container-apps/versions.tf`](../infra/terraform/modules/container-apps/versions.tf) |
-| Created | [`infra/terraform/modules/key-vault/main.tf`](../infra/terraform/modules/key-vault/main.tf) |
-| Created | [`infra/terraform/modules/key-vault/variables.tf`](../infra/terraform/modules/key-vault/variables.tf) |
-| Created | [`infra/terraform/modules/key-vault/versions.tf`](../infra/terraform/modules/key-vault/versions.tf) |
-| Created | [`infra/terraform/modules/monitoring/main.tf`](../infra/terraform/modules/monitoring/main.tf) |
-| Created | [`infra/terraform/modules/monitoring/variables.tf`](../infra/terraform/modules/monitoring/variables.tf) |
-| Created | [`infra/terraform/modules/monitoring/versions.tf`](../infra/terraform/modules/monitoring/versions.tf) |
-| Created | [`infra/terraform/modules/postgresql/main.tf`](../infra/terraform/modules/postgresql/main.tf) |
-| Created | [`infra/terraform/modules/postgresql/variables.tf`](../infra/terraform/modules/postgresql/variables.tf) |
-| Created | [`infra/terraform/modules/postgresql/versions.tf`](../infra/terraform/modules/postgresql/versions.tf) |
-| Created | [`infra/terraform/outputs.tf`](../infra/terraform/outputs.tf) |
-| Created | [`infra/terraform/providers.tf`](../infra/terraform/providers.tf) |
-| Created | [`infra/terraform/terraform.tfvars.example`](../infra/terraform/terraform.tfvars.example) |
-| Created | [`infra/terraform/tests/deployment.tftest.hcl`](../infra/terraform/tests/deployment.tftest.hcl) |
-| Created | [`infra/terraform/variables.tf`](../infra/terraform/variables.tf) |
-| Created | [`infra/terraform/versions.tf`](../infra/terraform/versions.tf) |
-| Created | [`services/fusion-mcp/.dockerignore`](../services/fusion-mcp/.dockerignore) |
-| Created | [`services/fusion-mcp/Dockerfile`](../services/fusion-mcp/Dockerfile) |
-| Created | [`services/fusion-mcp/pyproject.toml`](../services/fusion-mcp/pyproject.toml) |
-| Created | [`services/fusion-mcp/requirements-dev.lock`](../services/fusion-mcp/requirements-dev.lock) |
-| Created | [`services/fusion-mcp/requirements.lock`](../services/fusion-mcp/requirements.lock) |
-| Created | [`services/fusion-mcp/src/auth.py`](../services/fusion-mcp/src/auth.py) |
-| Created | [`services/fusion-mcp/src/config.py`](../services/fusion-mcp/src/config.py) |
-| Created | [`services/fusion-mcp/src/copilot_runner.py`](../services/fusion-mcp/src/copilot_runner.py) |
-| Created | [`services/fusion-mcp/src/schemas.py`](../services/fusion-mcp/src/schemas.py) |
-| Created | [`services/fusion-mcp/src/server.py`](../services/fusion-mcp/src/server.py) |
-| Created | [`services/fusion-mcp/tests/conftest.py`](../services/fusion-mcp/tests/conftest.py) |
-| Created | [`services/fusion-mcp/tests/test_runner.py`](../services/fusion-mcp/tests/test_runner.py) |
-| Created | [`services/fusion-mcp/tests/test_server.py`](../services/fusion-mcp/tests/test_server.py) |
-| Created | [`tests/integration/compose.yaml`](../tests/integration/compose.yaml) |
-| Created | [`tests/integration/ingress.py`](../tests/integration/ingress.py) |
-| Created | [`tests/integration/mock_copilot.py`](../tests/integration/mock_copilot.py) |
-| Created | [`tests/integration/run.py`](../tests/integration/run.py) |
-| Created | [`tests/test_azure_onboarding.py`](../tests/test_azure_onboarding.py) |
-| Created | [`tests/test_fusion_onboarding.py`](../tests/test_fusion_onboarding.py) |
-| Created | [`tests/test_security_contracts.py`](../tests/test_security_contracts.py) |
-| Modified | [`tools/build_guide.py`](../tools/build_guide.py) |
-| Modified | [`tools/check_package.py`](../tools/check_package.py) |
-| Modified | [`tools/check_public.py`](../tools/check_public.py) |
+Use [deployment](AZURE-DEPLOYMENT.md), [fallback setup](FUSION-FALLBACK.md),
+[MCP setup](FUSION-MCP.md), [security](SECURITY.md) and [validation](VALIDATION.md)
+for operator instructions. Existing live-provider evidence elsewhere in this
+repository does not certify these new SDK/fallback paths.

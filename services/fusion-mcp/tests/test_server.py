@@ -39,9 +39,12 @@ def test_unauthorized_and_origin_denied(config):
             ("Authorization", "Bearer wrong")]).status_code == 401
 
 
-def test_discovery_with_unsupported_cli(config):
-    config = replace(config, copilot_bin="/does-not-exist/copilot")
-    with TestClient(create_app(config)) as client:
+def test_discovery_with_unsupported_runtime(config):
+    from copilot_runner import CopilotRunner
+    def missing(**kwargs):
+        raise FileNotFoundError()
+    runner = CopilotRunner(config, client_factory=missing)
+    with TestClient(create_app(config, runner)) as client:
         assert client.get("/health/live").status_code == 200
         assert client.get("/health/ready").status_code == 503
         assert len(rpc(client, config, "tools/list").json()["result"]["tools"]) == 3
@@ -49,7 +52,7 @@ def test_discovery_with_unsupported_cli(config):
             "arguments": {"prompt": "hello"}}).json()["result"]
         assert wire["isError"] is True
         result = wire["structuredContent"]
-        assert result["ok"] is False and result["status"] == "cli_missing"
+        assert result["ok"] is False and result["status"] == "runtime_missing"
 
 
 def test_invalid_arguments_and_tier_policy(config):
@@ -72,3 +75,16 @@ def test_disabled_service_and_request_size(config):
     with TestClient(create_app(config)) as client:
         response = rpc(client, config, "tools/call", {"name": "fusion_standard", "arguments": {"prompt": "x" * 10000}})
         assert response.status_code == 413
+
+
+def test_dead_runtime_requests_container_restart(config, factory):
+    from copilot_runner import CopilotRunner
+    runner = CopilotRunner(config, client_factory=factory)
+    with TestClient(create_app(config, runner)) as client:
+        async def failed_ping():
+            raise ConnectionError("runtime exited")
+        runner.client.ping = failed_ping
+        assert client.get("/health/ready").status_code == 503
+        live = client.get("/health/live")
+        assert live.status_code == 503
+        assert live.json()["status"] == "restart_required"

@@ -1,123 +1,110 @@
-# Optional Azure and Fusion integration design
+# Optional Azure and Fusion integration
 
-Design agreed after independent Azure, Fusion, LiteLLM and security discovery
-on 19 November 2026. The initial repository baseline is 44 passing unit tests.
-Existing model routing and personal Copilot OAuth remain authoritative.
-
-Implementation verification found that the checksum-verified official Copilot
-CLI 1.0.114 still lacks `--fusion-tier`, despite current GitHub documentation.
-The service therefore ships with execution blocked as `unsupported_cli`.
-Mocks verify the documented mapping; an audited supported CLI upgrade is a
-prerequisite for live Fusion. No undocumented flags or substitute model is used.
+The existing Claude subscription route remains primary. Existing users retain
+their personal Copilot fallback and onboarding. A separate, explicitly enrolled
+owner can instead select native Copilot Fusion as automatic fallback. Fusion is
+disabled by default and uses Copilot entitlement, not Claude Team credits.
 
 ```mermaid
 flowchart LR
-  C[Claude Code] -->|existing personal inference key| L[LiteLLM 1.108.0]
-  L --> A[Claude subscription primary]
-  L --> O[Personal Copilot OAuth fallback]
-  C -. separate optional MCP key .-> M[LiteLLM /mcp]
-  M -. explicit owner grant + service bearer .-> F[Private Fusion MCP /mcp]
-  F --> G[Copilot CLI: capability checked]
+  C[Claude Code: executes tools] -->|personal inference key| L[LiteLLM 1.108.0]
+  L -->|primary| A[Existing Claude subscription route]
+  L -. authorized transient failure before output .-> I[Private Fusion context adapter]
+  C -. separate optional MCP key .-> M[LiteLLM MCP gateway]
+  M -. explicit owner grant .-> F[Private Fusion MCP tools]
+  I --> S[Copilot SDK and native runtime]
+  F --> S
+  S --> G[GitHub Copilot Fusion]
   L --> P[(Private PostgreSQL)]
   K[Key Vault] -->|managed identities| L
-  K -->|separate identity| F
+  K -->|separate identity| S
 ```
 
-## Compatibility and deployment modes
+The adapter and MCP server share one Container App and SDK runtime. LiteLLM
+runs in another Container App. The SDK manages a bundled native runtime over
+stdio; no interactive CLI login or subprocess-per-prompt command construction
+is required. Local startup is verified with SDK 2.0.1 and runtime 1.0.114.
+Live Fusion entitlement and inference remain operator checks.
 
-1. Existing gateway: all current commands, invitation formats, fallback routes
-   and personal OAuth flows keep their defaults. No Terraform or Azure login.
-2. Azure gateway: Terraform deploys the unchanged, digest-pinned official
-   LiteLLM 1.108.0 image and persistent PostgreSQL, or uses an existing database.
-3. Azure gateway with optional Fusion: the same gateway plus an internal MCP
-   service. Fusion is disabled by default and supports an explicitly declared
-   **single-user proof of concept only**. A shared multi-user Fusion service is
-   unsupported and must remain disabled.
+## Deployment and compatibility
 
-## Service and authentication contracts
+1. Existing gateway: current invitations, models, personal OAuth and defaults
+   remain unchanged. No Azure migration is required.
+2. Azure gateway: the digest-pinned official LiteLLM image uses persistent
+   PostgreSQL, Key Vault references and managed identities.
+3. Optional MCP: `enable_fusion_mcp=true` adds a private, single-owner service.
+4. Optional automatic fallback: `enable_fusion_fallback=true` also loads the
+   LiteLLM guard and enables the private inference adapter. A separate invitation
+   grants the configured owner a new restricted inference key.
+
+The last two modes do not support shared-token multi-user execution. The owner
+mapping is administrator-attested, not cryptographic GitHub identity delegation.
+
+## Contracts and authentication
 
 | Boundary | Contract |
 |---|---|
-| Legacy inference | Existing personal virtual key, model aliases and provider OAuth; unchanged |
-| Claude Code to MCP gateway | HTTPS `/mcp`; `x-litellm-api-key: Bearer <dedicated-key>` and `x-mcp-servers: <server-alias>` |
-| MCP grant | New user-bound key; explicit `object_permission.mcp_servers`, MCP-only routes, `no-default-models`; never expand existing keys |
-| Gateway registration | Native `/v1/mcp/server`, `transport: http`, `auth_type: bearer_token`, `allow_all_keys: false` |
-| Public client access | `available_on_public_internet` controls the **client IP**, not upstream ingress; authenticated public gateway clients need it enabled |
-| Gateway to Fusion | Internal ACA HTTPS `/mcp`, independent `FUSION_MCP_TOKEN`; never forward or reuse provider OAuth |
-| Fusion to CLI | Explicit single-user fine-grained PAT, child-only `COPILOT_GITHUB_TOKEN`; no inherited GitHub or BYOK credentials |
-| Owner | `FUSION_SINGLE_USER_SUBJECT` is the same existing LiteLLM user ID recorded on registration; only that subject may be enrolled |
-| Owner assurance | Administrator-attested account mapping; a static service bearer is not end-user delegation or cryptographic GitHub identity proof |
-| CLI request | Fixed executable and flags, fresh temporary HOME/workspace, prompt only, all tools denied, no repository mounts |
-| Runtime failure | Missing capabilities/credentials fail closed; no substitute model or invented CLI flags |
+| Existing inference | Existing personal key, aliases, provider OAuth and fallback policy |
+| Opt-in inference | New owner-bound key; Claude aliases plus one guarded Fusion tier |
+| Automatic eligibility | Transient primary failure before any output, once per request; no auth/input/policy fallback |
+| LiteLLM to inference adapter | Internal HTTPS `/v1/chat/completions`; independent service bearer; original provider credentials removed |
+| Claude Code to MCP gateway | `/mcp`, `x-litellm-api-key: Bearer <dedicated-key>`, `x-mcp-servers: <alias>` |
+| MCP grant | Explicit server permission, MCP-only routes, `no-default-models`; existing keys are not widened |
+| MCP registration | Native `/v1/mcp/server`, HTTP transport, bearer auth, `allow_all_keys: false` |
+| LiteLLM to MCP | Internal HTTPS `/mcp`, same independent service bearer; never a GitHub/provider token |
+| SDK to GitHub | Explicit single-owner fine-grained PAT; no ambient login discovery or BYOK |
+| Health | `/health/live` process check; `/health/ready` local SDK protocol check, no inference |
 
-The service does not trust caller-provided identity headers. Single-user
-registration is for a dedicated single-user gateway or an independently audited
-single-owner grant; it is not a way to share a token among developers. Azure
-ingress isolation does not replace bearer authentication. Native authorization
-must be tested against the pinned image, because current upstream documentation
-and version-specific permission behavior can differ.
+`FUSION_SINGLE_USER_SUBJECT` must match the enrollment owner. Neither caller
+headers nor the service bearer prove an end-user identity; authorization belongs
+at the pinned gateway and its owner-bound guard. MCP public-client-IP policy is
+independent of private upstream ingress.
 
-## Fusion interface
+## Context and tools
 
-- Port `8080`; Streamable HTTP `/mcp`.
-- `GET /health/live` checks the process; `GET /health/ready` checks configuration
-  and local CLI capabilities only. Neither sends a model request.
-- `fusion_standard`, `fusion_high`, `fusion_max` accept only `prompt: string`.
-- The documented mapping is `--model fusion --fusion-tier standard|high|max`.
-  Tool calls fail explicitly if the installed binary does not support it.
-- Default `FUSION_AUTH_MODE=disabled`; the only execution mode is `single_user`.
-- Required enabled settings: `FUSION_SINGLE_USER_SUBJECT`, `FUSION_GITHUB_TOKEN`,
-  `FUSION_MCP_TOKEN` (at least 32 characters).
-- Bounds: allowed tiers, timeout, input characters, output bytes and concurrency.
-  Cancellation terminates the process group and cleans temporary state.
-- Audit records contain generated request ID, configured owner, tier, duration,
-  status and exit code. They exclude prompts, output and secrets. Model-specific
-  usage/cost statistics are not invented.
+MCP tools `fusion_standard`, `fusion_high`, `fusion_max` accept a bounded text
+prompt and return the established structured result. They cannot run tools.
 
-## Infrastructure and persistence
+Automatic fallback accepts a supported text/tool transcript, passes system
+instructions separately and serializes prior conversation as context for a new
+Fusion task. This is not a native continuation of the Claude session. Declared
+tools have no server handlers: the SDK returns the first tool batch, the service
+aborts/deletes the session, and Claude Code executes the tools. The next request
+carries their actual results into another fresh task. Missing results are never
+invented and historical tools are not replayed.
 
-PostgreSQL uses a private delegated subnet and linked private DNS by default.
-The public gateway uses HTTPS and personal keys; Fusion has environment-only
-ingress. `enable_private_networking=true` makes the entire ACA environment
-private and requires customer network connectivity. This option is independent
-of private database and Fusion access.
+Responses are buffered before SSE delivery. Unsupported images/files and
+generation controls fail explicitly. Output token limits conservatively bound
+returned UTF-8 bytes; they do not cap upstream computation or billing. See the
+complete [fallback contract](FUSION-FALLBACK.md).
 
-LiteLLM mounts a nonsecret JSON configuration using a native ACA Secret volume.
-Its database URL, stable encryption salt and master key use Key Vault references
-and managed identity. Separate identities scope Fusion secrets independently.
-Terraform-created secret values are still present in state; state is sensitive.
-No paid dedicated workload profile, NAT gateway, firewall or ACR is required by
-default. Managed networking and persistent PostgreSQL still have costs.
+## Isolation and deadlines
 
-## Directory ownership and dependencies
+One warm runtime uses a minimal environment, empty agent mode, disabled built-in
+tools, instructions and memory discovery. Each call has a unique session and
+private workspace. Cancellation aborts/deletes state; failed cleanup closes
+admission and retires the runtime rather than reusing uncertain state.
 
-| Owner | Exclusive files | Dependency |
-|---|---|---|
-| Azure agent | `infra/terraform/**` | Fusion env/health contract; existing official image pin |
-| Fusion agent | `services/fusion-mcp/**` | Official CLI capability verification; supported MCP SDK |
-| LiteLLM agent | `_engine/azure.py`, `_engine/fusion.py`, additive `_engine/cli.py`, matching onboarding tests | Pinned API contracts and Terraform outputs |
-| Security/QA agent | `tests/integration/**`, `tests/test_security_contracts.py`, package/public scanners, checks workflow | Implemented service and onboarding interfaces |
-| Lead | Documentation, guide generator, `.gitignore`, cross-component decisions and final integration | All contributions and independent reviews |
+Azure defaults to one warm Fusion replica, one maximum replica, and bounded
+concurrency. MCP execution defaults to 120 seconds. Automatic fallback budgets
+60 seconds for primary and 140 for the adapter, including cleanup/transport;
+combined settings must total at most 230 seconds under ACA's 240-second ingress
+limit. Warm capacity reduces cold starts but incurs idle cost and cannot remove
+network or generation latency.
 
-Agents share this feature branch with disjoint file ownership. No concurrent
-edits to the same file are allowed; overlapping fixes are serialized by the
-lead. Independent security, Azure and functional reviews follow implementation.
+## Persistence and ownership
 
-## Verification boundaries
+PostgreSQL uses a private delegated subnet and linked DNS. Fusion has internal
+ingress. `enable_private_networking=true` additionally makes the whole ACA
+environment private and requires customer connectivity.
 
-Required local checks: existing/new unit tests; native MCP handshake/list/call
-with a mock CLI; denied unauthorized keys; Terraform formatting, validation and
-mocked plans; container build; guide generation and public-content scans.
-Fresh integration fixtures must not reuse the previous live pilot credentials
-or database. Azure deployment and paid GitHub execution are explicitly excluded
-from this implementation run. Live operator checks remain separate and opt-in.
+LiteLLM mounts configuration and, only when enabled, the guard source. Key Vault
+references provide its database URL, stable salt, master key and optional service
+bearer. LiteLLM receives no access to the Fusion GitHub PAT. Terraform state and
+plans contain generated secrets and require restricted storage.
 
-## Primary references
-
-- [Pinned LiteLLM MCP manager](https://github.com/BerriAI/litellm/blob/v1.108.0/litellm/proxy/_experimental/mcp_server/mcp_server_manager.py)
-- [LiteLLM MCP transport and authentication](https://docs.litellm.ai/docs/mcp_config_reference)
-- [GitHub CLI Fusion model selection](https://docs.github.com/en/copilot/how-tos/copilot-cli/use-copilot-cli/choose-a-model)
-- [GitHub CLI authentication](https://docs.github.com/en/copilot/how-tos/copilot-cli/set-up-copilot-cli/authenticate-copilot-cli)
-- [ACA secrets and managed identities](https://learn.microsoft.com/en-us/azure/container-apps/manage-secrets)
-- [ACA networking](https://learn.microsoft.com/en-us/azure/container-apps/custom-virtual-networks)
-- [PostgreSQL private networking](https://learn.microsoft.com/en-us/azure/postgresql/network/concepts-networking-private)
+Implementation ownership, SDK details and primary references are recorded in
+[SDK-MIGRATION.md](SDK-MIGRATION.md). Disjoint file ownership prevents concurrent
+edits; independent security, Azure and functional reviews follow implementation.
+Local tests use fresh databases and synthetic providers. No deployment or paid
+inference is implied by those results; see [validation](VALIDATION.md).

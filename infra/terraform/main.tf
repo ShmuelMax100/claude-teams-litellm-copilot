@@ -11,6 +11,18 @@ locals {
 resource "terraform_data" "requirements" {
   lifecycle {
     precondition {
+      condition     = !var.enable_fusion_fallback || var.enable_fusion_mcp
+      error_message = "Fusion fallback requires the explicitly enabled single-user Fusion MCP service."
+    }
+    precondition {
+      condition     = !var.enable_fusion_fallback || try(lower(local.fusion_secret_scopes["github"]) != lower(local.fusion_secret_scopes["mcp"]), false)
+      error_message = "Fusion fallback requires separate GitHub and service-bearer Key Vault secrets; the gateway must never receive GitHub credential access."
+    }
+    precondition {
+      condition     = !var.enable_fusion_fallback || var.fusion_primary_timeout_seconds + var.fusion_timeout_seconds + 20 <= 230
+      error_message = "Guarded fallback requires primary timeout + Fusion timeout + 20 seconds of transport margin to total at most 230 seconds for ACA ingress."
+    }
+    precondition {
       condition = var.enable_managed_postgresql || (
         can(regex("^https://[a-zA-Z0-9-]+\\.vault\\.azure\\.net/secrets/[^/]+(/[^/]+)?$", var.external_database_secret_id)) &&
         can(regex("^/subscriptions/[^/]+/resourceGroups/[^/]+/providers/Microsoft.KeyVault/vaults/[^/]+$", var.external_database_key_vault_id))
@@ -170,6 +182,14 @@ resource "azurerm_role_assignment" "registry_litellm" {
   principal_id         = azurerm_user_assigned_identity.litellm.principal_id
 }
 
+# The gateway guard calls the private service; it never receives the GitHub PAT.
+resource "azurerm_role_assignment" "litellm_fusion_bearer" {
+  count                = var.enable_fusion_fallback && local.fusion_configured ? 1 : 0
+  scope                = local.fusion_secret_scopes["mcp"]
+  role_definition_name = "Key Vault Secrets User"
+  principal_id         = azurerm_user_assigned_identity.litellm.principal_id
+}
+
 resource "azurerm_role_assignment" "registry_fusion" {
   count                = local.fusion_configured && var.registry_resource_id != null ? 1 : 0
   scope                = var.registry_resource_id
@@ -178,41 +198,47 @@ resource "azurerm_role_assignment" "registry_fusion" {
 }
 
 module "container_apps" {
-  source                        = "./modules/container-apps"
-  name_prefix                   = var.name_prefix
-  location                      = azurerm_resource_group.this.location
-  resource_group_name           = azurerm_resource_group.this.name
-  subnet_id                     = azurerm_subnet.apps.id
-  log_analytics_workspace_id    = module.monitoring.id
-  private_environment           = var.enable_private_networking
-  litellm_identity_id           = azurerm_user_assigned_identity.litellm.id
-  master_key_secret_id          = module.key_vault.master_key_secret_id
-  salt_key_secret_id            = module.key_vault.salt_key_secret_id
-  database_secret_id            = var.enable_managed_postgresql ? module.key_vault.database_secret_id : var.external_database_secret_id
-  litellm_image                 = var.litellm_image
-  litellm_cpu                   = var.litellm_cpu
-  litellm_memory                = var.litellm_memory
-  litellm_min_replicas          = var.litellm_min_replicas
-  litellm_max_replicas          = var.litellm_max_replicas
-  litellm_http_concurrency      = var.litellm_http_concurrency
-  litellm_log_level             = var.litellm_log_level
-  copilot_only_models           = var.copilot_only_models
-  gateway_allowed_cidrs         = var.gateway_allowed_cidrs
-  enable_fusion                 = local.fusion_configured
-  fusion_identity_id            = local.fusion_configured ? azurerm_user_assigned_identity.fusion[0].id : null
-  fusion_image                  = var.fusion_image
-  fusion_single_user_subject    = var.fusion_single_user_subject
-  fusion_github_token_secret_id = var.fusion_github_token_secret_id
-  fusion_mcp_token_secret_id    = var.fusion_mcp_token_secret_id
-  fusion_cpu                    = var.fusion_cpu
-  fusion_memory                 = var.fusion_memory
-  fusion_min_replicas           = var.fusion_min_replicas
-  fusion_max_replicas           = var.fusion_max_replicas
-  registry_server               = var.registry_server
-  tags                          = local.tags
+  source                         = "./modules/container-apps"
+  name_prefix                    = var.name_prefix
+  location                       = azurerm_resource_group.this.location
+  resource_group_name            = azurerm_resource_group.this.name
+  subnet_id                      = azurerm_subnet.apps.id
+  log_analytics_workspace_id     = module.monitoring.id
+  private_environment            = var.enable_private_networking
+  litellm_identity_id            = azurerm_user_assigned_identity.litellm.id
+  master_key_secret_id           = module.key_vault.master_key_secret_id
+  salt_key_secret_id             = module.key_vault.salt_key_secret_id
+  database_secret_id             = var.enable_managed_postgresql ? module.key_vault.database_secret_id : var.external_database_secret_id
+  litellm_image                  = var.litellm_image
+  litellm_cpu                    = var.litellm_cpu
+  litellm_memory                 = var.litellm_memory
+  litellm_min_replicas           = var.litellm_min_replicas
+  litellm_max_replicas           = var.litellm_max_replicas
+  litellm_http_concurrency       = var.litellm_http_concurrency
+  litellm_log_level              = var.litellm_log_level
+  copilot_only_models            = var.copilot_only_models
+  gateway_allowed_cidrs          = var.gateway_allowed_cidrs
+  enable_fusion                  = local.fusion_configured
+  enable_fusion_fallback         = var.enable_fusion_fallback && local.fusion_configured
+  fusion_guard_source            = var.enable_fusion_fallback && local.fusion_configured ? file("${path.module}/../../services/litellm-fusion-guard/fusion_fallback_guard.py") : null
+  fusion_identity_id             = local.fusion_configured ? azurerm_user_assigned_identity.fusion[0].id : null
+  fusion_image                   = var.fusion_image
+  fusion_single_user_subject     = var.fusion_single_user_subject
+  fusion_github_token_secret_id  = var.fusion_github_token_secret_id
+  fusion_mcp_token_secret_id     = var.fusion_mcp_token_secret_id
+  fusion_cpu                     = var.fusion_cpu
+  fusion_memory                  = var.fusion_memory
+  fusion_min_replicas            = var.fusion_min_replicas
+  fusion_max_replicas            = var.fusion_max_replicas
+  fusion_timeout_seconds         = var.fusion_timeout_seconds
+  fusion_primary_timeout_seconds = var.fusion_primary_timeout_seconds
+  fusion_max_concurrency         = var.fusion_max_concurrency
+  registry_server                = var.registry_server
+  tags                           = local.tags
 
   depends_on = [terraform_data.requirements, azurerm_role_assignment.litellm_secrets,
     azurerm_role_assignment.external_database, azurerm_role_assignment.fusion_secrets,
+    azurerm_role_assignment.litellm_fusion_bearer,
   azurerm_role_assignment.registry_litellm, azurerm_role_assignment.registry_fusion]
 }
 

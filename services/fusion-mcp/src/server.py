@@ -12,6 +12,7 @@ from auth import BearerGate
 from config import Config
 from copilot_runner import CopilotRunner
 from schemas import FusionResult
+from inference import create_inference_routes
 
 
 def create_app(config: Config | None = None, runner: CopilotRunner | None = None):
@@ -59,23 +60,36 @@ def create_app(config: Config | None = None, runner: CopilotRunner | None = None
     @asynccontextmanager
     async def lifespan(app):
         await runner.probe()
-        async with sdk_lifespan(app):
-            yield
+        try:
+            async with sdk_lifespan(app):
+                yield
+        finally:
+            await runner.close()
 
     async def live(request):
-        return JSONResponse({"status": "alive"})
+        # A failed local runtime cannot recover in this process. Signal ACA's
+        # liveness restart instead of leaving the sole replica unready forever.
+        # Ordinary provider errors and disabled configuration are not fatal.
+        fatal = runner.capability_status in ("runtime_unavailable", "cleanup_failed")
+        return JSONResponse({"status": "restart_required" if fatal else "alive"},
+                            status_code=503 if fatal else 200)
 
     async def ready(request):
+        await runner.check_health()
         return JSONResponse({"status": runner.capability_status,
-            "mode": config.auth_mode, "cli_capable": runner.capable},
+            "mode": config.auth_mode, "sdk_capable": runner.capable,
+            "sdk_version": runner.sdk_version, "runtime_version": runner.cli_version,
+            "cli_capable": runner.capable},
             status_code=200 if runner.capable else 503)
 
     app.router.lifespan_context = lifespan
     app.routes.extend([Route("/health/live", live), Route("/health/ready", ready)])
+    app.routes.extend(create_inference_routes(config, runner))
     app.add_middleware(BearerGate, config=config)
     # SDK/protocol logs can include invalid tool arguments. Retain only our
     # deliberately content-free audit logger in this service.
     logging.getLogger("mcp").setLevel(logging.CRITICAL)
+    logging.getLogger("copilot").setLevel(logging.CRITICAL)
     app.state.runner = runner
     return app
 
