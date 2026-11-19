@@ -17,3 +17,19 @@ private/
 *.bundle
 .gitleaks-report*
 _site/
+
+# Local infrastructure state, plans, credentials and build caches.
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+*.tfvars
+*.tfvars.json
+!*.tfvars.example
+!*.tfvars.json.example
+crash.log
+.venv/
+**/.venv/
+**/.pytest_cache/
+**/*.egg-info/
+**/build/

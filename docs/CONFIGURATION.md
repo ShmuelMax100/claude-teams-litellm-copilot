@@ -96,3 +96,36 @@ For actual fallback evidence, record the request ID, requested model group, actu
 Native WebSearch previously failed on the Copilot route. The optional search helper is separate from model routing and requires its own customer acceptance; Join never silently enables it. Verify required tools and model context behavior in the pilot.
 
 See the [onboarding guide](../START-HERE.html), [README](../README.md) and [deployment validation](VALIDATION.md).
+
+## Optional Azure and Fusion settings
+
+The default wizard and existing configurations retain their behavior.
+`./setup azure --help` exposes optional infrastructure operations, and
+`./setup fusion --help` exposes separate MCP registration/enrollment. See
+[Azure deployment](AZURE-DEPLOYMENT.md), [Fusion](FUSION-MCP.md),
+[administrator steps](ADMINISTRATOR.md) and [developer steps](DEVELOPER.md).
+
+| Component | Configuration / state |
+|---|---|
+| Terraform | `infra/terraform/variables.tf`; private `.tfvars`, state and saved plans |
+| Azure LiteLLM | Official 1.108.0 image; mounted config; database-backed model storage |
+| Azure secrets | Key Vault master key, stable salt, database URL and optional Fusion secrets |
+| Fusion runtime | `FUSION_*` environment settings; default disabled, explicit single-user owner |
+| MCP gateway | Native server record, owner metadata, independent upstream service bearer |
+| MCP client | Dedicated private invitation/key; one user-scoped Claude MCP registration |
+
+Fusion does not change `_engine/catalog.json`, provider credential definitions or
+existing invitation formats. MCP enrollment grants no inference models. The
+separate automatic fallback invitation creates a new owner-bound inference key;
+existing keys retain their policies. SDK authentication uses a separately
+provisioned fine-grained PAT and never reuses personal Copilot OAuth.
+
+`enable_fusion_fallback=false` is the Terraform default. When enabled it mounts
+`fusion_fallback_guard.py`, configures its callback and supplies owner, private
+API base, independent service bearer and bounded deadlines. The SDK endpoint
+also requires `FUSION_ENABLE_FALLBACK=true`. See [the full configuration and
+onboarding contract](FUSION-FALLBACK.md). Merely adding a model without the guard
+is insufficient. No global LiteLLM Messages conversion flag is changed.
+
+Readiness verifies local SDK/runtime health. Neither readiness nor tool discovery
+proves live Fusion entitlement or billing behavior.

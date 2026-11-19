@@ -18,6 +18,8 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
 class API:
     def __init__(self,url,key):
+        if not isinstance(key,str) or not key or any(not 33<=ord(c)<=126 for c in key):
+            raise Error('Invalid gateway key. Enter a nonempty key without whitespace or control characters.')
         self.url=origin(url); self.key=key
         self.opener=urllib.request.build_opener(NoRedirect)
     def call(self,path,method='GET',body=None,missing=False):

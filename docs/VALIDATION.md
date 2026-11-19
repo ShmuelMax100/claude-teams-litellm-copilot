@@ -53,3 +53,87 @@ These checks use temporary profiles and placeholder credentials. They do not con
 ## Copilot-only pilot · 18 November 2026
 
 See [the direct-mode guide](COPILOT-ONLY.md) and [the structured results](../COPILOT-VALIDATION.json). The latter distinguishes unit coverage, controlled gateway tests and verified live Copilot checks with documented limitations. The original validation above describes the legacy workflow.
+
+## Optional Azure / Fusion verification · 19 November 2026
+
+The Azure/Fusion implementation began with 44 existing unit tests. Before the
+SDK migration, 84 repository tests and 26 CLI-era service tests passed. These
+local results are separate from the historical live provider evidence above.
+No Azure infrastructure was deployed and no live Fusion request was sent.
+
+Current evidence and final counts are maintained in
+[IMPLEMENTATION-RESULTS.md](IMPLEMENTATION-RESULTS.md). Tests cover the real pinned
+LiteLLM image and fresh PostgreSQL, with only provider/SDK execution replaced by
+synthetic fixtures. Provider egress is blocked. Separate offline checks start the
+actual Copilot SDK/native runtime on Linux ARM64 and AMD64 and exercise its
+contract against a local mock provider. They prove local SDK behavior, not live
+Fusion entitlement, model selection, billing or routing quality.
+
+### Reproduce local checks
+
+```sh
+python3 -m unittest discover -s tests
+python3 -m venv /tmp/fusion-checks
+/tmp/fusion-checks/bin/python -m pip install --require-hashes \
+  -r services/fusion-mcp/requirements-dev.lock
+/tmp/fusion-checks/bin/python -m pytest services/fusion-mcp/tests -q
+docker build --platform linux/amd64 -t fusion-mcp:review services/fusion-mcp
+python3 tests/integration/run.py --image fusion-mcp:review
+terraform -chdir=infra/terraform init -backend=false
+terraform -chdir=infra/terraform fmt -check -recursive
+terraform -chdir=infra/terraform validate
+terraform -chdir=infra/terraform test
+python3 tools/build_guide.py
+python3 tools/check_package.py
+python3 tools/check_public.py
+```
+
+The container builds the SDK from checksum-pinned official release source when
+the wheel CDN is unavailable; provenance is retained in the image. Test dependency
+installation above uses the published wheel pin. A TLS/download failure must be
+fixed through an approved package source, never by disabling verification.
+
+CI also runs the real SDK offline startup and the pinned LiteLLM's nine-case
+fallback wire test with Docker networking disabled. Integration checks authorized
+and denied keys, persistence across gateway restart, SDK cancellation/deletion,
+credential non-forwarding, and the context/tool handoff. Independent hostile
+schema tests verify bounded rejection without blocking health or later requests.
+Do not supply real Azure/GitHub credentials to ordinary tests, reuse pilot
+storage, or point fixtures at a normal Claude profile.
+
+### Operator acceptance after an approved deployment
+
+| Check | Expected evidence | Model usage |
+|---|---|---|
+| Gateway health and DB | Healthy readiness and connected persistent database | None |
+| Dynamic storage | Preparation is repeatable; routes/grants survive restart | None |
+| Existing onboarding | Same identity, connection and settings behavior as before | Existing explicit live checks only |
+| SDK readiness | Correct local SDK/runtime versions and healthy protocol | None |
+| MCP discovery | Owner's dedicated key lists exactly the authorized tools | None |
+| Negative authorization | Anonymous, inference-only and ungranted clients cannot invoke MCP | None |
+| Fallback enrollment | Matching active guard, owner and restricted key policy | None |
+| Primary success | Ordinary Claude result, no Fusion session | Approved synthetic call |
+| Eligible fallback | Temporary primary failure starts one new Fusion task; context is preserved as data | Mock first; live separately approved |
+| Client tool round trip | Tool request returned to Claude Code, actual result carried in next context, no server side effects | Mock first; live separately approved |
+| Ineligible failure | Authentication/policy/input/partial-stream failure never switches to Fusion | Mock |
+| Standard/High/Max | Synthetic request succeeds only for configured/entitled tiers | Yes, only after approval |
+| Runtime failure | Readiness/liveness fail after local runtime loss and ACA restarts it | No model usage needed |
+| Rollback | Optional keys/routes/config removed; ordinary inference and database retained | None |
+
+Use `./setup azure validate --gateway https://gateway.example` for read-only
+readiness/database/model-registry checks, and `./setup doctor --fusion` for MCP
+discovery. `./setup fusion fallback-doctor --invite PATH` checks the owner key
+policy, not live service access. Default legacy doctor behavior retains its
+existing live checks.
+
+After account policy and deployment readiness are confirmed, an operator may
+explicitly opt into a synthetic live MCP call:
+
+```sh
+./setup fusion run --invite /secure/fusion.invite.json --tier standard \
+  --prompt-file /secure/approved-synthetic-prompt.txt --allow-live-usage
+```
+
+Higher tiers need applicable policy/usage approval. Use synthetic data for first
+acceptance. Discovery, a model label, or local runtime readiness does not prove
+particular internal model selection or multi-user identity isolation.

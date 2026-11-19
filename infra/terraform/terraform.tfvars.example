@@ -1,0 +1,53 @@
+# Copy to a protected local .tfvars file, or use ./setup azure configure.
+# Terraform state contains generated secrets. Configure an encrypted remote
+# backend with access controls before production use. Never commit state/plans.
+subscription_id = "00000000-0000-0000-0000-000000000000"
+name_prefix     = "litellm-dev"
+location        = "westeurope"
+tags = {
+  environment = "dev"
+  owner       = "platform-team"
+  cost_center = "development"
+}
+
+# Default: private managed PostgreSQL, authenticated public HTTPS gateway.
+enable_managed_postgresql = true
+enable_private_networking = false
+enable_fusion_mcp         = false
+enable_fusion_fallback    = false
+
+# Existing PostgreSQL: store a TLS-required connection URL in Key Vault first.
+# The deployer needs permission to assign secret-level RBAC on that vault.
+# enable_managed_postgresql        = false
+# external_database_key_vault_id   = "/subscriptions/<subscription>/resourceGroups/<group>/providers/Microsoft.KeyVault/vaults/<vault>"
+# external_database_secret_id      = "https://<vault>.vault.azure.net/secrets/postgresql-url"
+
+# Fusion is a SINGLE-USER POC, disabled by default. Publish an audited Linux
+# AMD64 image containing the matching SDK/runtime before enabling it. Runtime
+# readiness checks do not establish account entitlement or model availability.
+# This never grants a developer MCP access automatically.
+# enable_fusion_mcp             = true
+# fusion_single_user_subject    = "<existing-litellm-user-id>"
+# fusion_image                  = "<registry>/fusion-mcp@sha256:<64-character-image-digest>"
+# fusion_key_vault_id           = "/subscriptions/<subscription>/resourceGroups/<group>/providers/Microsoft.KeyVault/vaults/<vault>"
+# fusion_github_token_secret_id = "https://<vault>.vault.azure.net/secrets/fusion-github-token"
+# fusion_mcp_token_secret_id    = "https://<vault>.vault.azure.net/secrets/fusion-service-token"
+# fusion_min_replicas           = 1   # Warm runtime; ongoing idle/active charges.
+# fusion_max_replicas           = 1   # Each replica has its own runtime.
+# fusion_timeout_seconds        = 120 # Maximum 210 for ACA's 240-second ingress.
+# fusion_max_concurrency        = 2   # Isolated sessions within one runtime.
+# Use fusion_min_replicas = 0 for scale-to-zero savings with cold-start latency.
+# Optional native fallback also needs the explicitly enabled single-owner
+# Fusion service above. It loads the checked-in gateway guard, grants only the
+# service bearer secret to the gateway, and enables the private /v1 adapter.
+# It does not enroll model aliases or virtual keys automatically.
+# enable_fusion_fallback = true
+# fusion_primary_timeout_seconds = 60
+# Fallback total: primary 60 + Fusion 120 + transport 20 = 200 seconds.
+# The total must be <=230, leaving at least 10 seconds for ACA ingress overhead.
+# MCP-only mode may use fusion_timeout_seconds=210; fallback requires a lower
+# Fusion timeout to leave room for the primary attempt and transport margin.
+
+# Optional existing private Azure Container Registry. No ACR is provisioned.
+# registry_server      = "<registry>.azurecr.io"
+# registry_resource_id = "/subscriptions/<subscription>/resourceGroups/<group>/providers/Microsoft.ContainerRegistry/registries/<registry>"

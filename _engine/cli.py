@@ -219,6 +219,19 @@ class Wizard:
         self.ui.header('Restore previous local settings')
         if self.ui.yes('Restore the previous settings? This does not revoke gateway access.'):
             self.ui.step('Restore settings without overwriting later changes',developer.undo)
+    def azure_setup(self):
+        self.ui.header('Optional Azure deployment')
+        self.ui.note('Create private deployment variables, review a saved plan, then explicitly apply it.')
+        self.ui.note('./setup azure configure')
+        self.ui.note('./setup azure plan')
+        self.ui.note('./setup azure apply')
+        self.ui.note('Fusion remains disabled by default. See docs/AZURE-DEPLOYMENT.md.')
+    def fusion_setup(self):
+        self.ui.header('Optional Fusion MCP · single-user proof of concept')
+        self.ui.note('Registration and a separate MCP-only invitation require administrator approval.')
+        self.ui.note('./setup fusion --help')
+        self.ui.note('Only the registered single-user owner can enroll. Existing inference keys stay unchanged.')
+        self.ui.note('Fusion calls use Copilot entitlement; discovery does not prove live access. See docs/FUSION-MCP.md.')
     def run(self,role=None):
         while True:
             try:
@@ -231,14 +244,22 @@ class Wizard:
                     if pick==2:self.models();continue
                     role='admin' if pick==0 else 'developer'
                 self.ui.header('Administrator' if role=='admin' else 'Developer')
-                choices=['Prepare customer gateway','Invite a new developer','Show model options','Back'] if role=='admin' else ['Join with my invitation','Check my connection','Show my models and fallback policy','Restore previous settings','Back']
+                choices=['Prepare customer gateway','Invite a new developer','Show model options','Optional Azure deployment','Optional Fusion MCP','Back'] if role=='admin' else ['Join with my invitation','Check my connection','Show my models and fallback policy','Restore previous settings','Back']
                 pick=self.ui.choose('Choose an action',choices)
                 if pick==len(choices)-1:self.admin_session=None;role=None;continue
-                action=[self.prepare,self.invite,self.models][pick] if role=='admin' else [self.join,self.doctor,self.models,self.restore][pick]
+                action=[self.prepare,self.invite,self.models,self.azure_setup,self.fusion_setup][pick] if role=='admin' else [self.join,self.doctor,self.models,self.restore][pick]
                 action()
             except (Error,ValueError,KeyError,OSError) as e:self.ui.warn(str(e));self.ui.note('Correct the issue and retry. No key is included in this message.')
 
 def main():
+    # Explicit optional command trees leave every legacy argument and default untouched.
+    if len(sys.argv)>1 and sys.argv[1] in ('azure','fusion'):
+        import importlib
+        return importlib.import_module(sys.argv[1]).main(sys.argv[2:])
+    if len(sys.argv)>1 and sys.argv[1] in ('doctor','models') and '--fusion' in sys.argv[2:]:
+        import fusion
+        args=sys.argv[2:];args.remove('--fusion')
+        return fusion.main(['doctor' if sys.argv[1]=='doctor' else 'tools']+args)
     sys.argv=[part for arg in sys.argv for part in (['--mode',arg.split('=',1)[1]] if arg.startswith('--mode=') else [arg])]
     if '--mode' in sys.argv:
         args=sys.argv[1:];i=args.index('--mode')
@@ -250,7 +271,7 @@ def main():
         if mode!='legacy':raise Error('Unsupported integration mode.')
         sys.argv=[sys.argv[0]]+args
     p=argparse.ArgumentParser(prog='./setup',description='Guided Claude Teams + LiteLLM + Copilot onboarding')
-    p.epilog='Direct mode: ./setup --mode copilot-only --help (legacy is the default).'
+    p.epilog='Direct mode: ./setup --mode copilot-only --help. Optional: ./setup azure --help; ./setup fusion --help. Legacy is the default.'
     p.add_argument('role',nargs='?',choices=['admin','developer','doctor','models']);args=p.parse_args()
     w=Wizard()
     if args.role=='doctor':w.doctor()
