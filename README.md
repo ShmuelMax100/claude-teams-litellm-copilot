@@ -2,6 +2,17 @@
 
 For direct GitHub Copilot without a Claude subscription or fallback, see the [copilot-only pilot guide](docs/COPILOT-ONLY.md). Use `./setup --mode copilot-only --help`. The original workflow remains the default.
 
+Optional hosting and tools: [deploy LiteLLM on Azure](docs/AZURE-DEPLOYMENT.md),
+[configure the single-user Fusion MCP POC](docs/FUSION-MCP.md), or review the
+[integration architecture](docs/ARCHITECTURE.md) and [security boundaries](docs/SECURITY.md).
+The [implementation report](docs/IMPLEMENTATION-RESULTS.md) lists delivered files,
+test evidence, manual setup steps and production limitations.
+Fusion is disabled by default. **The verified official Copilot CLI 1.0.114 lacks
+`--fusion-tier`; the shipped service refuses live execution with
+`unsupported_cli`.** The documented mapping is tested with mocks. An audited
+supported CLI build is required before activation; no Azure deployment or live
+Fusion inference was performed.
+
 **One onboarding flow. Personal provider identities. Automatic fallback at the gateway.**
 
 This onboarding package connects Claude Code to an **existing customer LiteLLM gateway**. Requests first use the developer’s eligible Claude Teams subscription. If a mapped primary request fails with an eligible provider error, LiteLLM tries the configured GitHub Copilot model using that developer’s connected account.
@@ -75,7 +86,10 @@ Deliver that file privately to Alex. On Alex’s machine, run `./setup developer
 - The APIs and per-user OAuth behavior validated on **LiteLLM 1.108.0**.
 - A separately eligible Claude seat and Copilot entitlement for every developer.
 
-This repository configures an existing deployment. It does not provision hosting, TLS, database infrastructure, SMTP, organization-wide SSO, budgets or high availability.
+The default flow configures an existing deployment. The optional
+[`infra/terraform/`](infra/terraform/) path provisions Azure hosting, HTTPS and
+persistent PostgreSQL. SMTP, organization-wide SSO, budgets and production
+availability policies remain operator responsibilities.
 
 ## Developer journey
 
@@ -115,6 +129,12 @@ No special launcher is needed after joining. The wizard updates `~/.claude/setti
 
 This uses native LiteLLM routes, credentials and key-level router settings. There is no custom request adapter or modified LiteLLM container image in the package. The architecture covers Claude Teams as the primary provider and GitHub Copilot as the backup provider.
 
+Optional Fusion uses a separate Claude Code MCP registration through LiteLLM
+`/mcp` and a dedicated MCP-only key. It does not replace model routing or reuse
+the existing provider OAuth credential. The first implementation supports only
+an explicitly declared single-user POC, with an internal authenticated service.
+See the [extended architecture and contracts](docs/ARCHITECTURE.md).
+
 ## Models and fallback policy
 
 | Requested primary | Default Copilot backup | Direct backup alias |
@@ -152,6 +172,9 @@ Use `/model` in Claude Code to choose a primary, or enter a direct alias such as
 
 Compatibility checks cover macOS, LiteLLM 1.108.0 and Claude Code 2.1.317:
 
+The following live results are the historical legacy validation. New Azure/Fusion
+checks and their limits are recorded separately in [validation](docs/VALIDATION.md).
+
 - **17 automated tests** for onboarding, identity checks, settings merge/restore, malformed invitations and wrapper behavior.
 - Three primary and four direct Copilot model selections responded successfully.
 - After genuine subscription quota exhaustion, **Sonnet, Opus and Haiku all fell back successfully**; gateway records show `attempted_fallbacks=1`. A primary-only diagnostic returned real Anthropic HTTP 429.
@@ -182,6 +205,11 @@ The guide build uses only checked-in sources and embeds the diagram PNGs. Automa
 | `docs/CONFIGURATION.md` | Administrator configuration reference |
 | `diagrams/` | Three architecture PNGs used in this README and guide |
 | `tests/` | Offline tests |
+| `infra/terraform/` | Optional Azure resources, variables and mocked plan tests |
+| `services/fusion-mcp/` | Optional isolated single-user MCP service and container |
+| `tests/integration/` | Fresh local gateway tests with a mock CLI; no provider usage |
+| `docs/AZURE-DEPLOYMENT.md`, `docs/FUSION-MCP.md` | Optional deployment and tool setup |
+| `docs/ARCHITECTURE.md`, `docs/SECURITY.md` | Service contracts, ownership and identity boundaries |
 | `HANDOFF-TEMPLATE.txt` | Private delivery instructions |
 | `VALIDATION.json`, `docs/VALIDATION.md` | Aggregate results and repeatable deployment checks |
 | `IMAGE-PROMPTS.txt` | Architecture image generation provenance |

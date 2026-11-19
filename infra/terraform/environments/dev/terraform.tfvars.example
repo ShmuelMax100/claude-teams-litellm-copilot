@@ -1,0 +1,12 @@
+# Run from infra/terraform, copying this file to a protected local path.
+# This is a root-module variable set, not a separate Terraform deployment.
+subscription_id           = "00000000-0000-0000-0000-000000000000"
+name_prefix               = "litellm-dev"
+location                  = "westeurope"
+enable_fusion_mcp          = false
+enable_managed_postgresql  = true
+enable_private_networking = false
+litellm_min_replicas       = 1
+litellm_max_replicas       = 2
+postgresql_sku            = "B_Standard_B1ms"
+tags = { environment = "dev", owner = "platform-team" }

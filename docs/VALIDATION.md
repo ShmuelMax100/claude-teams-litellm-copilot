@@ -53,3 +53,71 @@ These checks use temporary profiles and placeholder credentials. They do not con
 ## Copilot-only pilot · 18 November 2026
 
 See [the direct-mode guide](COPILOT-ONLY.md) and [the structured results](../COPILOT-VALIDATION.json). The latter distinguishes unit coverage, controlled gateway tests and verified live Copilot checks with documented limitations. The original validation above describes the legacy workflow.
+
+## Optional Azure / Fusion verification · 19 November 2026
+
+The implementation began with **44 passing existing unit tests** plus successful
+guide/package/public-content checks. This is separate from the historical live
+provider results above. Azure was not deployed and no live Fusion request was
+sent. Official CLI 1.0.114 was verified locally and lacks `--fusion-tier`; the
+service correctly refuses that unsupported capability.
+
+Final local results: **84 repository tests**, **23 service tests**, **8 mocked
+Terraform plans** and **10 real-gateway integration groups** passed. Both ARM64
+and AMD64 Docker builds passed. Independent security, Azure and functional
+reviews approved after fixes. See [the implementation report](IMPLEMENTATION-RESULTS.md)
+for file inventory, limitations and remaining manual steps.
+
+Run the new service tests in an isolated Python 3.11+ environment:
+
+```sh
+python3 -m venv /tmp/fusion-checks
+/tmp/fusion-checks/bin/python -m pip install --require-hashes \
+  -r services/fusion-mcp/requirements-dev.lock
+/tmp/fusion-checks/bin/python -m pytest services/fusion-mcp/tests -q
+python3 -m unittest discover -s tests
+docker build -t fusion-mcp:review services/fusion-mcp
+python3 tests/integration/run.py --image fusion-mcp:review
+terraform -chdir=infra/terraform init -backend=false
+terraform -chdir=infra/terraform fmt -check -recursive
+terraform -chdir=infra/terraform validate
+terraform -chdir=infra/terraform test
+```
+
+These tests mock provider execution. Do not provide Azure credentials or real
+GitHub tokens to ordinary unit/CI checks. The integration fixture uses a fresh
+local PostgreSQL instance and the pinned official LiteLLM image, with a mock CLI
+behind the actual MCP service. It must never reuse `private/pilot/`, a live
+OAuth connection or a developer's normal Claude configuration.
+
+### Operator acceptance after an approved deployment
+
+| Check | Expected evidence | Model usage |
+|---|---|---|
+| Gateway health and DB | Readiness reports healthy and database connected | None |
+| Dynamic model storage | Administrator preparation is repeatable; routes survive restart | None |
+| Existing developer onboarding | Same owner/key/connection/settings behavior as before | Existing explicit live checks only |
+| MCP initialization/discovery | Dedicated owner's key lists exactly the authorized Fusion tools | None |
+| Negative authorization | Anonymous, inference-only and ungranted clients cannot invoke Fusion | None |
+| CLI capability | Required Fusion and restrictive flags verified locally | None |
+| Standard execution | Opt-in synthetic prompt succeeds; owner/tier/status recorded | Yes, only after approval |
+| Max execution | Same, only when configured and permitted by policy | Yes, only after approval |
+| Failure isolation | Timeout/provider failure yields bounded error, no fallback or credential reuse | Mock first |
+| Disable/uninstall | Optional resources/entry removed; inference and database retained | None |
+
+Use `./setup azure validate --gateway https://gateway.example` for read-only
+readiness/database/model-registry checks. Use `./setup fusion doctor` or
+`./setup doctor --fusion` for MCP discovery without model usage. Default legacy
+doctor behavior remains unchanged and includes its existing live checks.
+
+Only after resolving CLI support and enterprise entitlement, an operator may
+explicitly opt into a synthetic live call:
+
+```sh
+./setup fusion run --invite /secure/fusion.invite.json --tier standard \
+  --prompt-file /secure/approved-synthetic-prompt.txt --allow-live-usage
+```
+
+Use `--tier max` only after separate policy/usage approval. Do not use customer
+source code for initial validation. A discovery result or model label does not
+prove specific internal model selection or multi-user identity isolation.

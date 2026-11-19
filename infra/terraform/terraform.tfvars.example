@@ -1,0 +1,36 @@
+# Copy to a protected local .tfvars file, or use ./setup azure configure.
+# Terraform state contains generated secrets. Configure an encrypted remote
+# backend with access controls before production use. Never commit state/plans.
+subscription_id = "00000000-0000-0000-0000-000000000000"
+name_prefix     = "litellm-dev"
+location        = "westeurope"
+tags = {
+  environment = "dev"
+  owner       = "platform-team"
+  cost_center = "development"
+}
+
+# Default: private managed PostgreSQL, authenticated public HTTPS gateway.
+enable_managed_postgresql = true
+enable_private_networking = false
+enable_fusion_mcp         = false
+
+# Existing PostgreSQL: store a TLS-required connection URL in Key Vault first.
+# The deployer needs permission to assign secret-level RBAC on that vault.
+# enable_managed_postgresql        = false
+# external_database_key_vault_id   = "/subscriptions/<subscription>/resourceGroups/<group>/providers/Microsoft.KeyVault/vaults/<vault>"
+# external_database_secret_id      = "https://<vault>.vault.azure.net/secrets/postgresql-url"
+
+# Fusion is a SINGLE-USER POC, disabled by default. The checked-in CLI pin
+# currently fails capability readiness; publish an audited, capable image
+# before enabling. This never grants a developer MCP access automatically.
+# enable_fusion_mcp             = true
+# fusion_single_user_subject    = "<existing-litellm-user-id>"
+# fusion_image                  = "<registry>/fusion-mcp@sha256:<64-character-image-digest>"
+# fusion_key_vault_id           = "/subscriptions/<subscription>/resourceGroups/<group>/providers/Microsoft.KeyVault/vaults/<vault>"
+# fusion_github_token_secret_id = "https://<vault>.vault.azure.net/secrets/fusion-github-token"
+# fusion_mcp_token_secret_id    = "https://<vault>.vault.azure.net/secrets/fusion-service-token"
+
+# Optional existing private Azure Container Registry. No ACR is provisioned.
+# registry_server      = "<registry>.azurecr.io"
+# registry_resource_id = "/subscriptions/<subscription>/resourceGroups/<group>/providers/Microsoft.ContainerRegistry/registries/<registry>"
