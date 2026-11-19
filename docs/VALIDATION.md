@@ -62,7 +62,7 @@ provider results above. Azure was not deployed and no live Fusion request was
 sent. Official CLI 1.0.114 was verified locally and lacks `--fusion-tier`; the
 service correctly refuses that unsupported capability.
 
-Final local results: **84 repository tests**, **23 service tests**, **8 mocked
+Final local results: **84 repository tests**, **26 service tests**, **8 mocked
 Terraform plans** and **10 real-gateway integration groups** passed. Both ARM64
 and AMD64 Docker builds passed. Independent security, Azure and functional
 reviews approved after fixes. See [the implementation report](IMPLEMENTATION-RESULTS.md)

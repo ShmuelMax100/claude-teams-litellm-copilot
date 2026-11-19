@@ -3,6 +3,8 @@ from dataclasses import replace
 import json
 import os
 import signal
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -31,7 +33,8 @@ async def test_documented_tiers_and_safe_command(config, tier):
 
 
 @pytest.mark.parametrize("prompt", ["", " ", "bad\x00prompt", "read @/etc/passwd", "x" * 32001,
-    " /delegate do work", "& do work", "!id", "--allow-all"])
+    " /delegate do work", "& do work", "!id", "--allow-all"],
+    ids=["empty", "whitespace", "nul", "file-reference", "oversize", "slash-command", "delegate", "shell", "option"])
 async def test_invalid_prompt(config, prompt):
     runner = CopilotRunner(config)
     runner.capable = True
@@ -60,6 +63,18 @@ async def test_timeout_failure_output_cap_and_redaction(config, caplog):
     assert (await runner.run("standard", "secrets")).output == "[REDACTED]"
     assert config.github_token not in caplog.text
     assert not list(config.workspace_root.iterdir())
+
+
+@pytest.mark.parametrize("prompt", ["overflow", "overflow_stderr", "overflow_both"])
+async def test_full_pipes_are_discarded_before_process_wait(config, prompt):
+    runner = CopilotRunner(replace(config, max_output_bytes=1024, max_concurrency=1))
+    await runner.probe()
+    # This used to hang on Linux after SIGKILL because wait() preceded pipe
+    # drainage. The independent deadline catches cleanup deadlocks promptly.
+    result = await asyncio.wait_for(runner.run("standard", prompt), timeout=3)
+    assert result.status == "output_limit"
+    assert not list(config.workspace_root.iterdir())
+    assert (await asyncio.wait_for(runner.run("standard", "hello"), timeout=3)).ok
 
 
 async def test_concurrency_isolation_and_environment(config, monkeypatch):
@@ -94,9 +109,18 @@ async def test_busy_and_cancellation_reap_process_group(config):
     assert not list(config.workspace_root.iterdir())
     # A killed child can briefly be an init-owned zombie; either absent or
     # zombie is evidence that it cannot keep running or retain its workspace.
-    import subprocess
-    check = subprocess.run(["ps", "-o", "stat=", "-p", str(child_pid)], capture_output=True, text=True)
-    assert not check.stdout.strip() or check.stdout.strip().startswith("Z")
+    if sys.platform.startswith("linux"):
+        # Minimal runtime containers need no procps package just for tests.
+        stat = Path(f"/proc/{child_pid}/stat")
+        try:
+            state = stat.read_text().rsplit(") ", 1)[1].split()[0]
+        except FileNotFoundError:
+            state = ""
+    else:
+        import subprocess
+        state = subprocess.run(["ps", "-o", "stat=", "-p", str(child_pid)],
+            capture_output=True, text=True).stdout.strip()
+    assert not state or state.startswith("Z")
     assert (await runner.run("standard", "hello")).ok
 
 

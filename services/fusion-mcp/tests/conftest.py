@@ -10,7 +10,7 @@ from copilot_runner import REQUIRED_FLAGS
 @pytest.fixture
 def config(tmp_path):
     executable = tmp_path / "fake-copilot"
-    executable.write_text(f"#!{sys.executable}\n" + '''import json, os, subprocess, sys, time
+    executable.write_text(f"#!{sys.executable}\n" + '''import json, os, subprocess, sys, time, threading
 if '--help' in sys.argv:
     print(HELP)
 elif '--version' in sys.argv:
@@ -19,6 +19,12 @@ else:
     prompt = sys.argv[sys.argv.index('-p') + 1]
     if prompt == 'sleep': time.sleep(30)
     elif prompt == 'overflow': print('x' * 1000000)
+    elif prompt == 'overflow_stderr': print('x' * 1000000, file=sys.stderr)
+    elif prompt == 'overflow_both':
+        thread = threading.Thread(target=lambda: os.write(2, b'x' * 1000000))
+        thread.start()
+        os.write(1, b'x' * 1000000)
+        thread.join()
     elif prompt == 'fail':
         print(os.environ['COPILOT_GITHUB_TOKEN'], file=sys.stderr)
         sys.exit(7)
@@ -29,7 +35,10 @@ else:
         print(json.dumps({'home': os.environ['HOME'], 'cwd': os.getcwd()}))
     elif prompt == 'child':
         child = subprocess.Popen([sys.executable, '-c', 'import time;time.sleep(60)'])
-        open(os.path.join(os.environ['HOME'], 'pid'), 'w').write(str(child.pid))
+        pidfile = os.path.join(os.environ['HOME'], 'pid')
+        with open(pidfile + '.tmp', 'w') as stream:
+            stream.write(str(child.pid))
+        os.replace(pidfile + '.tmp', pidfile)
         time.sleep(60)
     else: print('mock answer')
 '''.replace("print(HELP)", "print(" + repr(" ".join(REQUIRED_FLAGS)) + ")"))

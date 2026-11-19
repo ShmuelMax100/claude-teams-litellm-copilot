@@ -86,14 +86,35 @@ class CopilotRunner:
                 "--deny-tool", "read,write,shell,url,memory", "--silent",
                 "--model", "fusion", "--fusion-tier", tier, "-p", prompt]
 
-    async def _terminate(self, process):
+    async def _terminate(self, process, readers):
+        # Stop the bounded collectors before consuming the pipes elsewhere.
+        for reader in readers:
+            reader.cancel()
+        await asyncio.gather(*readers, return_exceptions=True)
         # The group can outlive its leader. Kill the whole session even if the
         # leader already exited, then reap it before removing its workspace.
         try:
             os.killpg(process.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
-        await process.wait()
+
+        async def discard(stream):
+            while await stream.read(8192):
+                pass
+
+        try:
+            async with asyncio.timeout(5):
+                # On Linux, wait() can wait for pipe disconnection even after
+                # SIGKILL. A collector that exceeded its cap leaves a paused
+                # reader, so drain and discard pending bytes before waiting.
+                await asyncio.gather(discard(process.stdout), discard(process.stderr))
+                await process.wait()
+        except TimeoutError:
+            # A detached descendant could retain a pipe descriptor. asyncio's
+            # Process has no public close API; close its transport as a bounded
+            # last resort so one failed call cannot retain pipes indefinitely.
+            process._transport.close()
+            await asyncio.wait_for(process.wait(), timeout=1)
 
     async def _execute(self, args, home, work, timeout, credential, limit):
         process = await asyncio.create_subprocess_exec(*args, cwd=work,
@@ -120,10 +141,7 @@ class CopilotRunner:
                 return code, stdout, stderr
         finally:
             # Also reap tool descendants left behind by a normally exiting CLI.
-            await asyncio.shield(self._terminate(process))
-            for reader in readers:
-                reader.cancel()
-            await asyncio.gather(*readers, return_exceptions=True)
+            await asyncio.shield(self._terminate(process, readers))
 
     async def probe(self):
         self.capable = False

@@ -28,7 +28,7 @@ the command mapping and transport; live Fusion is not claimed to work.
 |---|---|
 | Existing baseline before changes | 44 unit tests passed |
 | Final repository unit suite | 84 passed, including existing tests |
-| Fusion service suite | 23 passed |
+| Fusion service suite | 26 passed; Linux and macOS coverage |
 | Real gateway with synthetic CLI/providers | 10 integration groups passed, including persistence across gateway restart |
 | Terraform | Format, initialization, validation and 8 mocked plan scenarios passed |
 | Docker images | Linux ARM64 and AMD64 builds passed; non-root runtime |
@@ -51,7 +51,9 @@ No existing live pilot state or normal Claude profile is used.
 Security review fixes include rejecting additive MCP access-group/toolset/tool
 grants on dedicated keys, rejecting malformed keys before HTTP diagnostics,
 strict tool argument/error contracts and aligned client/gateway execution
-timeouts. Legacy `admin.py`, `developer.py`, `copilot.py`, model catalog and the
+timeouts. Bounded pipe drainage before process reaping prevents Linux output-limit
+cleanup deadlocks; separate stdout/stderr/combined saturation tests verify
+workspace and concurrency recovery. Legacy `admin.py`, `developer.py`, `copilot.py`, model catalog and the
 `setup` shell entry point remain byte-for-byte unchanged. The shared API helper
 only adds safe rejection of malformed credential headers.
 
