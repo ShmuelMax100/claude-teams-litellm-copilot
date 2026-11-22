@@ -45,11 +45,14 @@ def test_environment_maps_only_admin_named_individual_credentials(config):
 
 
 @pytest.mark.parametrize('claims', [
-    {'aud': 'other'}, {'sub': 'not-enrolled'}, {'exp': 1}, {'iat': int(time.time()) + 30},
-    {'iat': False}, {'exp': True}, {'v': True}, {'exp': int(time.time()) + 61},
+    {'aud': 'other'}, {'sub': 'not-enrolled'}, {'exp': 1}, {'iat': lambda now: now + 30},
+    {'iat': False}, {'exp': True}, {'v': True}, {'exp': lambda now: now + 61},
     {'jti': ''}, {'jti': '\n'}, {'unexpected': 'value'},
 ])
-def test_invalid_or_unknown_assertions_never_start_sdk(config, factory, claims):
+def test_invalid_or_unknown_assertions_never_start_sdk(config, factory, claims, monkeypatch):
+    now = int(time.time())
+    monkeypatch.setattr('auth.time.time', lambda: now)
+    claims = {name: value(now) if callable(value) else value for name, value in claims.items()}
     with TestClient(create_app(config)) as client:
         response = client.post('/v1/chat/completions', headers=identity_headers(config, **claims),
             json={'model': 'fusion-standard', 'messages': [{'role': 'user', 'content': 'hello'}]})
