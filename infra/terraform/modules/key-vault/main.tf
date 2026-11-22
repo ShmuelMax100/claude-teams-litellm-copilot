@@ -61,3 +61,20 @@ output "name" { value = azurerm_key_vault.this.name }
 output "master_key_secret_id" { value = azurerm_key_vault_secret.master.versionless_id }
 output "salt_key_secret_id" { value = azurerm_key_vault_secret.salt.versionless_id }
 output "database_secret_id" { value = var.create_database_secret ? azurerm_key_vault_secret.database[0].versionless_id : null }
+
+# Independent of PATs and transport bearer; used only for delegated identities.
+resource "random_password" "fusion_identity" {
+  length  = 64
+  special = false
+}
+
+resource "azurerm_key_vault_secret" "fusion_identity" {
+  name         = "fusion-identity-key"
+  value        = random_password.fusion_identity.result
+  key_vault_id = azurerm_key_vault.this.id
+  content_type = "Fusion gateway identity assertion HMAC signing key"
+  tags         = var.tags
+  depends_on   = [azurerm_role_assignment.deployer]
+}
+
+output "fusion_identity_key_secret_id" { value = azurerm_key_vault_secret.fusion_identity.versionless_id }

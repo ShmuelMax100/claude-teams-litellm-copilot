@@ -66,24 +66,12 @@ variable "litellm_log_level" {
   type = string
 }
 
-variable "copilot_only_models" {
-  type = map(string)
-}
-
 variable "gateway_allowed_cidrs" {
   type = list(string)
 }
 
-variable "enable_fusion" {
-  type = bool
-}
-
-variable "enable_fusion_fallback" {
-  type = bool
-}
-
 variable "fusion_guard_source" {
-  description = "Checked-in nonsecret guard source; mounted only for explicitly enabled fallback."
+  description = "Checked-in nonsecret guard enforcing the only supported Fusion inference path."
   type        = string
 }
 
@@ -92,18 +80,6 @@ variable "fusion_identity_id" {
 }
 
 variable "fusion_image" {
-  type = string
-}
-
-variable "fusion_single_user_subject" {
-  type = string
-}
-
-variable "fusion_github_token_secret_id" {
-  type = string
-}
-
-variable "fusion_mcp_token_secret_id" {
   type = string
 }
 
@@ -127,10 +103,6 @@ variable "fusion_timeout_seconds" {
   type = number
 }
 
-variable "fusion_primary_timeout_seconds" {
-  type = number
-}
-
 variable "fusion_max_concurrency" {
   type = number
 }
@@ -142,3 +114,13 @@ variable "registry_server" {
 variable "tags" {
   type = map(string)
 }
+
+variable "fusion_users" {
+  type = map(object({
+    github_token_secret_id = string
+    expires_at             = number
+  }))
+}
+
+variable "fusion_service_token_secret_id" { type = string }
+variable "fusion_identity_key_secret_id" { type = string }

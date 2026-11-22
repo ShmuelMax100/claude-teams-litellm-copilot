@@ -20,17 +20,23 @@ class Handler(BaseHTTPRequestHandler):
         try:
             connection.request(self.command, self.path, body, headers)
             response = connection.getresponse()
-            data = response.read(1048577)
-            if len(data) > 1048576:
-                self.send_error(502)
-                return
             self.send_response(response.status)
             for name, value in response.getheaders():
                 if name.lower() not in ('content-length', 'connection', 'transfer-encoding'):
                     self.send_header(name, value)
-            self.send_header('Content-Length', str(len(data)))
+            self.send_header('Connection', 'close')
             self.end_headers()
-            self.wfile.write(data)
+            self.close_connection = True
+            remaining = 1048576
+            while remaining:
+                data = response.read1(min(16384, remaining))
+                if not data:
+                    break
+                self.wfile.write(data)
+                self.wfile.flush()
+                remaining -= len(data)
+            if remaining == 0:
+                raise OSError('fixture response limit exceeded')
         except (OSError, http.client.HTTPException):
             self.send_error(502)
         finally:

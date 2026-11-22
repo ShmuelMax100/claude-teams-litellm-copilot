@@ -15,33 +15,55 @@ resource "azurerm_container_app_environment" "this" {
 }
 
 locals {
-  # JSON is YAML-compatible. This contains references, never provider secrets.
+  # JSON is YAML-compatible. All public models route to this private service.
   litellm_config = jsonencode({
-    model_list = [for alias, model in var.copilot_only_models : {
-      model_name = alias
+    model_list = [for tier in ["standard", "high", "max"] : {
+      model_name = "fusion-${tier}"
       litellm_params = {
-        model                    = "github_copilot/${model}"
-        litellm_credential_name  = "github-copilot-user"
-        github_copilot_auth_type = "per_user_oauth"
+        model       = "custom_openai/fusion-${tier}"
+        api_base    = "os.environ/FUSION_API_BASE"
+        api_key     = "os.environ/FUSION_SERVICE_TOKEN"
+        max_retries = 0
+        timeout     = var.fusion_timeout_seconds + 20
       }
     }]
     general_settings = {
-      master_key           = "os.environ/LITELLM_MASTER_KEY"
-      database_url         = "os.environ/DATABASE_URL"
-      store_model_in_db    = true
-      trusted_proxy_ranges = []
-      disable_spend_logs   = false
+      master_key                        = "os.environ/LITELLM_MASTER_KEY"
+      database_url                      = "os.environ/DATABASE_URL"
+      store_model_in_db                 = false
+      trusted_proxy_ranges              = []
+      disable_spend_logs                = false
+      forward_client_headers_to_llm_api = false
     }
-    litellm_settings = merge(
-      { json_logs = true, turn_off_message_logging = true },
-      var.enable_fusion_fallback ? { callbacks = ["fusion_fallback_guard.guard"] } : {}
-    )
+    litellm_settings = {
+      json_logs                = true
+      turn_off_message_logging = true
+      callbacks                = ["fusion_gateway_guard.guard"]
+    }
+    router_settings = {
+      # A user-specific expired PAT must not disable the shared deployment.
+      disable_cooldowns        = true
+      num_retries              = 0
+      max_fallbacks            = 0
+      fallbacks                = []
+      context_window_fallbacks = []
+      content_policy_fallbacks = []
+    }
   })
-  litellm_secrets = merge({
-    master-key   = var.master_key_secret_id
-    salt-key     = var.salt_key_secret_id
-    database-url = var.database_secret_id
-  }, var.enable_fusion_fallback ? { fusion-mcp-token = var.fusion_mcp_token_secret_id } : {})
+  litellm_secrets = {
+    master-key           = var.master_key_secret_id
+    salt-key             = var.salt_key_secret_id
+    database-url         = var.database_secret_id
+    fusion-service-token = var.fusion_service_token_secret_id
+    fusion-identity-key  = var.fusion_identity_key_secret_id
+  }
+  user_secrets = { for subject, user in var.fusion_users :
+    "github-user-${substr(sha256(subject), 0, 16)}" => user.github_token_secret_id
+  }
+  user_credentials = { for subject, user in var.fusion_users : subject => {
+    token_env  = "FUSION_GITHUB_USER_${upper(substr(sha256(subject), 0, 16))}"
+    expires_at = user.expires_at
+  } }
 }
 
 resource "azurerm_container_app" "litellm" {
@@ -67,14 +89,10 @@ resource "azurerm_container_app" "litellm" {
     name  = "litellm-config"
     value = local.litellm_config
   }
-  # ACA Secret volumes also support small, nonsecret checked-in source files.
-  # Keeping the guard here preserves the audited official gateway image.
-  dynamic "secret" {
-    for_each = var.enable_fusion_fallback ? [var.fusion_guard_source] : []
-    content {
-      name  = "fusion-guard"
-      value = secret.value
-    }
+  # Nonsecret checked-in source is mounted into the digest-pinned gateway image.
+  secret {
+    name  = "fusion-guard"
+    value = var.fusion_guard_source
   }
   dynamic "registry" {
     for_each = var.registry_server == null ? [] : [var.registry_server]
@@ -112,12 +130,9 @@ resource "azurerm_container_app" "litellm" {
       name         = "configuration"
       storage_type = "Secret"
     }
-    dynamic "volume" {
-      for_each = var.enable_fusion_fallback ? [true] : []
-      content {
-        name         = "fusion-guard"
-        storage_type = "Secret"
-      }
+    volume {
+      name         = "fusion-guard"
+      storage_type = "Secret"
     }
     container {
       name   = "litellm"
@@ -129,34 +144,31 @@ resource "azurerm_container_app" "litellm" {
         name = "configuration"
         path = "/etc/litellm"
       }
-      dynamic "volume_mounts" {
-        for_each = var.enable_fusion_fallback ? [true] : []
-        content {
-          name     = "fusion-guard"
-          path     = "/app/fusion_fallback_guard.py"
-          sub_path = "fusion-guard"
-        }
+      volume_mounts {
+        name     = "fusion-guard"
+        path     = "/app/fusion_gateway_guard.py"
+        sub_path = "fusion-guard"
       }
       dynamic "env" {
-        for_each = merge({
-          LITELLM_MASTER_KEY = "master-key"
-          LITELLM_SALT_KEY   = "salt-key"
-          DATABASE_URL       = "database-url"
-        }, var.enable_fusion_fallback ? { FUSION_FALLBACK_BEARER_TOKEN = "fusion-mcp-token" } : {})
+        for_each = {
+          LITELLM_MASTER_KEY   = "master-key"
+          LITELLM_SALT_KEY     = "salt-key"
+          DATABASE_URL         = "database-url"
+          FUSION_SERVICE_TOKEN = "fusion-service-token"
+          FUSION_IDENTITY_KEY  = "fusion-identity-key"
+        }
         content {
           name        = env.key
           secret_name = env.value
         }
       }
       dynamic "env" {
-        for_each = var.enable_fusion_fallback ? {
-          PYTHONPATH                              = "/app"
-          FUSION_FALLBACK_OWNER_SUBJECT           = var.fusion_single_user_subject
-          FUSION_FALLBACK_API_BASE                = "https://${azurerm_container_app.fusion[0].ingress[0].fqdn}/v1"
-          FUSION_FALLBACK_PRIMARY_TIMEOUT_SECONDS = tostring(var.fusion_primary_timeout_seconds)
-          FUSION_FALLBACK_TIMEOUT_SECONDS         = tostring(var.fusion_timeout_seconds + 20)
-          FUSION_GUARD_SHA256                     = sha256(var.fusion_guard_source)
-        } : {}
+        for_each = {
+          PYTHONPATH             = "/app"
+          FUSION_API_BASE        = "https://${azurerm_container_app.fusion.ingress[0].fqdn}/v1"
+          FUSION_TIMEOUT_SECONDS = tostring(var.fusion_timeout_seconds + 20)
+          FUSION_GUARD_SHA256    = sha256(var.fusion_guard_source)
+        }
         content {
           name  = env.key
           value = env.value
@@ -169,7 +181,7 @@ resource "azurerm_container_app" "litellm" {
       }
       env {
         name  = "STORE_MODEL_IN_DB"
-        value = "True"
+        value = "False"
       }
       env {
         name  = "LITELLM_LOG"
@@ -203,7 +215,6 @@ resource "azurerm_container_app" "litellm" {
 }
 
 resource "azurerm_container_app" "fusion" {
-  count                        = var.enable_fusion ? 1 : 0
   name                         = "${var.name_prefix}-fusion"
   container_app_environment_id = azurerm_container_app_environment.this.id
   resource_group_name          = var.resource_group_name
@@ -215,7 +226,7 @@ resource "azurerm_container_app" "fusion" {
     identity_ids = [var.fusion_identity_id]
   }
   dynamic "secret" {
-    for_each = { github-token = var.fusion_github_token_secret_id, mcp-token = var.fusion_mcp_token_secret_id }
+    for_each = merge(local.user_secrets, { service-token = var.fusion_service_token_secret_id, identity-key = var.fusion_identity_key_secret_id })
     content {
       name                = secret.key
       identity            = var.fusion_identity_id
@@ -253,20 +264,20 @@ resource "azurerm_container_app" "fusion" {
       cpu    = var.fusion_cpu
       memory = var.fusion_memory
       env {
-        name  = "FUSION_AUTH_MODE"
-        value = "single_user"
+        name  = "FUSION_USER_CREDENTIALS_JSON"
+        value = jsonencode(local.user_credentials)
       }
-      env {
-        name  = "FUSION_SINGLE_USER_SUBJECT"
-        value = var.fusion_single_user_subject
-      }
-      env {
-        name        = "FUSION_GITHUB_TOKEN"
-        secret_name = "github-token"
-      }
-      env {
-        name        = "FUSION_MCP_TOKEN"
-        secret_name = "mcp-token"
+      dynamic "env" {
+        for_each = merge({
+          FUSION_SERVICE_TOKEN = "service-token"
+          FUSION_IDENTITY_KEY  = "identity-key"
+          }, { for subject, credential in local.user_credentials :
+          credential.token_env => "github-user-${substr(sha256(subject), 0, 16)}"
+        })
+        content {
+          name        = env.key
+          secret_name = env.value
+        }
       }
       env {
         name  = "FUSION_TIMEOUT_SECONDS"
@@ -275,13 +286,6 @@ resource "azurerm_container_app" "fusion" {
       env {
         name  = "FUSION_MAX_CONCURRENCY"
         value = tostring(var.fusion_max_concurrency)
-      }
-      dynamic "env" {
-        for_each = var.enable_fusion_fallback ? [true] : []
-        content {
-          name  = "FUSION_ENABLE_FALLBACK"
-          value = "true"
-        }
       }
       # The image bundles the pinned SDK/runtime. Its stdio connection remains
       # inside this container: no additional ingress port or sidecar is needed.
@@ -315,42 +319,51 @@ resource "azurerm_container_app" "fusion" {
   }
 }
 
+moved {
+  from = azurerm_container_app.fusion[0]
+  to   = azurerm_container_app.fusion
+}
+
 output "gateway_url" { value = "https://${azurerm_container_app.litellm.ingress[0].fqdn}" }
-output "fusion_mcp_url" { value = var.enable_fusion ? "https://${azurerm_container_app.fusion[0].ingress[0].fqdn}/mcp" : null }
+output "fusion_mcp_url" { value = "https://${azurerm_container_app.fusion.ingress[0].fqdn}/mcp" }
 output "default_domain" { value = azurerm_container_app_environment.this.default_domain }
 output "static_ip_address" { value = azurerm_container_app_environment.this.static_ip_address }
-# Public, nonsecret planned settings make mocked root tests explicit.
+# Nonsecret planned settings allow explicit mocked root tests.
 output "contract" {
   value = {
-    fusion_enabled           = var.enable_fusion
-    fusion_fallback_enabled  = var.enable_fusion_fallback
-    fusion_external_ingress  = var.enable_fusion ? azurerm_container_app.fusion[0].ingress[0].external_enabled : false
+    same_environment         = azurerm_container_app.litellm.container_app_environment_id == azurerm_container_app.fusion.container_app_environment_id
+    fusion_external_ingress  = azurerm_container_app.fusion.ingress[0].external_enabled
     gateway_external_ingress = azurerm_container_app.litellm.ingress[0].external_enabled
     gateway_allow_insecure   = azurerm_container_app.litellm.ingress[0].allow_insecure_connections
     private_environment      = var.private_environment
     config                   = local.litellm_config
-    gateway_fallback = {
+    gateway = {
       secret_names  = keys(local.litellm_secrets)
       volume_mounts = azurerm_container_app.litellm.template[0].container[0].volume_mounts
       settings = { for setting in azurerm_container_app.litellm.template[0].container[0].env : setting.name => setting.value
-        if contains(["PYTHONPATH", "FUSION_FALLBACK_OWNER_SUBJECT", "FUSION_GUARD_SHA256", "FUSION_FALLBACK_API_BASE", "FUSION_FALLBACK_PRIMARY_TIMEOUT_SECONDS", "FUSION_FALLBACK_TIMEOUT_SECONDS"], setting.name)
+        if contains(["PYTHONPATH", "FUSION_GUARD_SHA256", "FUSION_API_BASE", "FUSION_TIMEOUT_SECONDS", "STORE_MODEL_IN_DB"], setting.name)
       }
-      bearer_secret = [for setting in azurerm_container_app.litellm.template[0].container[0].env : setting.secret_name
-        if setting.name == "FUSION_FALLBACK_BEARER_TOKEN"
-      ]
+      secret_settings = { for setting in azurerm_container_app.litellm.template[0].container[0].env : setting.name => setting.secret_name
+        if contains(["FUSION_SERVICE_TOKEN", "FUSION_IDENTITY_KEY"], setting.name)
+      }
     }
-    fusion_runtime = var.enable_fusion ? {
-      min_replicas              = azurerm_container_app.fusion[0].template[0].min_replicas
-      max_replicas              = azurerm_container_app.fusion[0].template[0].max_replicas
-      termination_grace_seconds = azurerm_container_app.fusion[0].template[0].termination_grace_period_seconds
-      target_port               = azurerm_container_app.fusion[0].ingress[0].target_port
-      http_concurrency          = azurerm_container_app.fusion[0].template[0].http_scale_rule[0].concurrent_requests
-      startup_probe             = azurerm_container_app.fusion[0].template[0].container[0].startup_probe[0]
-      liveness_probe            = azurerm_container_app.fusion[0].template[0].container[0].liveness_probe[0]
-      readiness_probe           = azurerm_container_app.fusion[0].template[0].container[0].readiness_probe[0]
-      settings = { for setting in azurerm_container_app.fusion[0].template[0].container[0].env : setting.name => setting.value
-        if contains(["FUSION_TIMEOUT_SECONDS", "FUSION_MAX_CONCURRENCY", "FUSION_ENABLE_FALLBACK"], setting.name)
+    fusion_runtime = {
+      min_replicas              = azurerm_container_app.fusion.template[0].min_replicas
+      max_replicas              = azurerm_container_app.fusion.template[0].max_replicas
+      termination_grace_seconds = azurerm_container_app.fusion.template[0].termination_grace_period_seconds
+      target_port               = azurerm_container_app.fusion.ingress[0].target_port
+      http_concurrency          = azurerm_container_app.fusion.template[0].http_scale_rule[0].concurrent_requests
+      startup_probe             = azurerm_container_app.fusion.template[0].container[0].startup_probe[0]
+      liveness_probe            = azurerm_container_app.fusion.template[0].container[0].liveness_probe[0]
+      readiness_probe           = azurerm_container_app.fusion.template[0].container[0].readiness_probe[0]
+      credentials               = local.user_credentials
+      secret_names              = keys(local.user_secrets)
+      settings = { for setting in azurerm_container_app.fusion.template[0].container[0].env : setting.name => setting.value
+        if contains(["FUSION_TIMEOUT_SECONDS", "FUSION_MAX_CONCURRENCY"], setting.name)
       }
-    } : null
+      secret_settings = { for setting in azurerm_container_app.fusion.template[0].container[0].env : setting.name => setting.secret_name
+        if setting.secret_name != "" && setting.secret_name != null
+      }
+    }
   }
 }

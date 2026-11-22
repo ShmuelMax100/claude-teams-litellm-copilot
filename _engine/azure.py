@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Optional Terraform deployment workflow. Nothing deploys without explicit apply."""
+"""Terraform workflow for the required LiteLLM and Fusion ACA environment."""
 import argparse
 import getpass
 import json
@@ -24,7 +24,7 @@ def _run(command, capture=False):
     try:
         result = subprocess.run(command, capture_output=True, text=True, timeout=3600)
     except FileNotFoundError:
-        raise Error('Install ' + command[0] + ' before using the optional Azure workflow.') from None
+        raise Error('Install ' + command[0] + ' before using the Azure workflow.') from None
     except subprocess.TimeoutExpired:
         raise Error('Deployment command timed out. Inspect Azure and Terraform state before retrying.') from None
     if result.returncode:
@@ -41,7 +41,8 @@ def _terraform(directory, *arguments, capture=False):
     return _run(['terraform', '-chdir=' + str(directory), *arguments], capture=capture)
 
 
-def configure(subscription_id, name_prefix, location='westeurope', owner=None, destination=DEFAULT_VARS):
+def configure(subscription_id, name_prefix, location='westeurope', owner=None, destination=DEFAULT_VARS,
+              fusion_image=None, fusion_key_vault_id=None, fusion_service_token_secret_id=None, fusion_users=None):
     try:
         uuid.UUID(subscription_id)
     except (ValueError, AttributeError):
@@ -53,8 +54,18 @@ def configure(subscription_id, name_prefix, location='westeurope', owner=None, d
     destination = Path(destination).expanduser()
     if destination.exists() or destination.is_symlink():
         raise Error('Configuration already exists. Review it manually rather than overwriting it.')
+    if not all((fusion_image, fusion_key_vault_id, fusion_service_token_secret_id)) or not isinstance(fusion_users, dict) or not fusion_users:
+        raise Error('Fusion image, Key Vault ID, service secret ID and per-user secret references are required.')
+    for subject, credential in fusion_users.items():
+        if (not isinstance(subject, str) or not re.fullmatch(r'[A-Za-z0-9_.:@-]{1,128}', subject) or not isinstance(credential, dict)
+                or set(credential) != {'github_token_secret_id', 'expires_at'}
+                or not isinstance(credential['github_token_secret_id'], str)
+                or type(credential['expires_at']) is not int):
+            raise Error('Each Fusion user requires only github_token_secret_id and integer expires_at; never paste token values.')
     value = {'subscription_id': subscription_id, 'name_prefix': name_prefix, 'location': location,
-             'enable_fusion_mcp': False, 'enable_managed_postgresql': True,
+             'fusion_image': fusion_image, 'fusion_key_vault_id': fusion_key_vault_id,
+             'fusion_service_token_secret_id': fusion_service_token_secret_id, 'fusion_users': fusion_users,
+             'enable_managed_postgresql': True,
              'enable_private_networking': False,
              'tags': {'environment': 'dev', 'owner': owner or getpass.getuser()}}
     private_write(destination, value)
@@ -123,7 +134,7 @@ def outputs(directory=DEFAULT_DIRECTORY):
             if name in result and not result[name].get('sensitive', True)}
     if safe.get('gateway_url'):
         safe['gateway_url'] = origin(safe['gateway_url'])
-    safe['next'] = './setup admin → Prepare customer gateway, using gateway_url and the master key from Key Vault.'
+    safe['next'] = './setup admin prepare --gateway URL --upstream PRIVATE_HTTPS/v1; use the master key from Key Vault.'
     return safe
 
 
@@ -135,7 +146,7 @@ def validate(gateway, key):
     models = api.call('/v1/models').get('data', [])
     return {'gateway': api.url, 'database': 'connected', 'litellm_version': details.get('litellm_version'),
             'registered_models': [item.get('id') for item in models], 'model_requests': 0,
-            'next': './setup admin to prepare routes; existing developer onboarding stays unchanged.'}
+            'next': './setup admin prepare --gateway URL --upstream PRIVATE_HTTPS/v1 verifies the fixed Fusion routes.'}
 
 
 def main(argv=None):
@@ -146,6 +157,10 @@ def main(argv=None):
     config.add_argument('--name-prefix')
     config.add_argument('--location', default='westeurope')
     config.add_argument('--owner')
+    config.add_argument('--fusion-image', required=True)
+    config.add_argument('--fusion-key-vault-id', required=True)
+    config.add_argument('--fusion-service-token-secret-id', required=True)
+    config.add_argument('--fusion-users-file', type=Path, required=True, help='JSON mapping subjects to Key Vault secret references and Unix expiry; no PAT values')
     config.add_argument('--out', type=Path, default=DEFAULT_VARS)
     for name in ('plan', 'apply', 'outputs'):
         command = commands.add_parser(name)
@@ -159,7 +174,8 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if args.command == 'configure':
         result = configure(args.subscription_id or choose_subscription(), args.name_prefix or input('Environment name: ').strip(),
-                           args.location, args.owner, args.out)
+                           args.location, args.owner, args.out, args.fusion_image, args.fusion_key_vault_id,
+                           args.fusion_service_token_secret_id, json.loads(args.fusion_users_file.read_text()))
     elif args.command == 'plan':
         result = plan(args.directory, args.var_file, args.plan_file)
     elif args.command == 'apply':

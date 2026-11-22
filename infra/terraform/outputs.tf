@@ -4,7 +4,7 @@ output "gateway_url" {
 }
 
 output "fusion_mcp_url" {
-  description = "Environment-only HTTPS MCP endpoint. Register explicitly; no developer keys are changed by Terraform."
+  description = "Environment-only HTTPS MCP tool endpoint; requires signed per-user identity. The model route uses the separate adapter."
   value       = module.container_apps.fusion_mcp_url
 }
 
@@ -20,6 +20,6 @@ output "master_key_secret_name" {
 }
 
 output "gateway_config_json" {
-  description = "Nonsecret active config for audited copilot-only --server-config validation; values are environment references, not credentials."
+  description = "Nonsecret fixed Fusion model configuration; values are environment references, not credentials."
   value       = module.container_apps.contract.config
 }

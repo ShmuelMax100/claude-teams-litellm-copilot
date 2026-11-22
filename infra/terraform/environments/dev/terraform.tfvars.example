@@ -1,21 +1,42 @@
-# Run from infra/terraform, copying this file to a protected local path.
-# This is a root-module variable set, not a separate Terraform deployment.
-subscription_id        = "00000000-0000-0000-0000-000000000000"
-name_prefix            = "litellm-dev"
-location               = "westeurope"
-enable_fusion_mcp      = false
-enable_fusion_fallback = false
-# If Fusion is explicitly enabled, the default keeps one warm SDK runtime and
-# incurs ongoing idle/active charges. Set fusion_min_replicas = 0 to trade first
-# request latency for scale-to-zero savings. No Fusion resource exists here.
-fusion_min_replicas            = 1
-fusion_max_replicas            = 1
-fusion_timeout_seconds         = 120
-fusion_primary_timeout_seconds = 60 # Fallback total: 60 + 120 + 20 = 200; max 230.
-fusion_max_concurrency         = 2
-enable_managed_postgresql      = true
-enable_private_networking      = false
-litellm_min_replicas           = 1
-litellm_max_replicas           = 2
-postgresql_sku                 = "B_Standard_B1ms"
-tags                           = { environment = "dev", owner = "platform-team" }
+# Run from infra/terraform. This is a root-module variable set, not a separate deployment.
+# Copy to a protected, ignored path. Never place credential VALUES in this file.
+subscription_id = "00000000-0000-0000-0000-000000000000"
+name_prefix     = "litellm-dev"
+location        = "westeurope" # Verify that your selected subscription accepts this region.
+tags            = { environment = "dev", owner = "platform-team" }
+
+# Both applications are mandatory in one ACA environment. Build and publish the
+# reviewed Fusion image separately, then record its immutable digest here.
+fusion_image                  = "<registry>/fusion-mcp@sha256:<64-character-image-digest>"
+fusion_key_vault_id           = "/subscriptions/<subscription>/resourceGroups/<group>/providers/Microsoft.KeyVault/vaults/<vault>"
+fusion_service_token_secret_id = "https://<vault>.vault.azure.net/secrets/fusion-service-token"
+fusion_users = {
+  "<exact-litellm-user-id>" = {
+    github_token_secret_id = "https://<vault>.vault.azure.net/secrets/github-user-one"
+    expires_at             = 0 # REQUIRED: actual PAT expiry as Unix seconds; zero is rejected.
+  }
+  # Add each person with a DIFFERENT user-owned PAT and secret scope.
+}
+# The separate assertion signing key is generated and stored in the deployment
+# Key Vault. Only Fusion can read user PATs; LiteLLM never receives them.
+
+# Warm replicas reduce cold starts and incur continuing idle/active charges.
+fusion_min_replicas    = 1
+fusion_max_replicas    = 1
+fusion_timeout_seconds = 120 # At most 210; gateway adds 20 seconds below ACA's 240.
+fusion_max_concurrency = 2
+# Set fusion_min_replicas = 0 only if cold-start latency is acceptable.
+
+enable_managed_postgresql = true
+enable_private_networking = false
+litellm_min_replicas      = 1
+litellm_max_replicas      = 2
+postgresql_sku            = "B_Standard_B1ms"
+# Private environments additionally require VPN/peering and split DNS.
+# Existing database alternative:
+# enable_managed_postgresql      = false
+# external_database_secret_id    = "https://<vault>.vault.azure.net/secrets/postgresql-url"
+# external_database_key_vault_id = "/subscriptions/<subscription>/resourceGroups/<group>/providers/Microsoft.KeyVault/vaults/<vault>"
+# Private ACR pulls require both values, authorizing only AcrPull:
+# registry_server      = "<registry>.azurecr.io"
+# registry_resource_id = "/subscriptions/<subscription>/resourceGroups/<group>/providers/Microsoft.ContainerRegistry/registries/<registry>"

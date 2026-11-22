@@ -1,26 +1,25 @@
 locals {
   tags                           = merge({ managed_by = "terraform", project = "litellm-copilot" }, var.tags)
   external_database_secret_scope = try("${var.external_database_key_vault_id}/secrets/${split("/", var.external_database_secret_id)[4]}", null)
-  fusion_configured              = var.enable_fusion_mcp && alltrue([for value in [var.fusion_image, var.fusion_single_user_subject, var.fusion_key_vault_id, var.fusion_github_token_secret_id, var.fusion_mcp_token_secret_id] : value != null])
-  fusion_secret_scopes = local.fusion_configured ? {
-    github = "${var.fusion_key_vault_id}/secrets/${try(split("/", var.fusion_github_token_secret_id)[4], "missing")}"
-    mcp    = "${var.fusion_key_vault_id}/secrets/${try(split("/", var.fusion_mcp_token_secret_id)[4], "missing")}"
-  } : {}
+  fusion_vault_name              = try(element(reverse(split("/", var.fusion_key_vault_id)), 0), "")
+  fusion_secret_scopes = merge({
+    service = "${var.fusion_key_vault_id}/secrets/${try(split("/", var.fusion_service_token_secret_id)[4], "missing")}"
+    }, { for subject, user in var.fusion_users : "user-${substr(sha256(subject), 0, 16)}" =>
+    "${var.fusion_key_vault_id}/secrets/${try(split("/", user.github_token_secret_id)[4], "missing")}"
+  })
 }
 
 resource "terraform_data" "requirements" {
   lifecycle {
     precondition {
-      condition     = !var.enable_fusion_fallback || var.enable_fusion_mcp
-      error_message = "Fusion fallback requires the explicitly enabled single-user Fusion MCP service."
+      condition     = length(distinct([for scope in values(local.fusion_secret_scopes) : lower(scope)])) == length(local.fusion_secret_scopes)
+      error_message = "Each user must have a different PAT secret scope; the service bearer must be separate from every GitHub credential. Secret versions and casing do not establish isolation."
     }
     precondition {
-      condition     = !var.enable_fusion_fallback || try(lower(local.fusion_secret_scopes["github"]) != lower(local.fusion_secret_scopes["mcp"]), false)
-      error_message = "Fusion fallback requires separate GitHub and service-bearer Key Vault secrets; the gateway must never receive GitHub credential access."
-    }
-    precondition {
-      condition     = !var.enable_fusion_fallback || var.fusion_primary_timeout_seconds + var.fusion_timeout_seconds + 20 <= 230
-      error_message = "Guarded fallback requires primary timeout + Fusion timeout + 20 seconds of transport margin to total at most 230 seconds for ACA ingress."
+      condition = alltrue([for user in values(var.fusion_users) :
+        try(timecmp(timeadd("1970-01-01T00:00:00Z", "${user.expires_at}s"), plantimestamp()) > 0, false)
+      ])
+      error_message = "Every configured GitHub credential must have a future expiry. Expired credentials cannot authorize a deployment."
     }
     precondition {
       condition = var.enable_managed_postgresql || (
@@ -30,14 +29,15 @@ resource "terraform_data" "requirements" {
       error_message = "External PostgreSQL requires a Key Vault secret URI and vault resource ID. The stored URL must require TLS."
     }
     precondition {
-      condition = !var.enable_fusion_mcp || (
+      condition = (
         can(regex("@sha256:[0-9a-f]{64}$", var.fusion_image)) &&
-        try(length(trimspace(var.fusion_single_user_subject)) > 0, false) &&
-        can(regex("^/subscriptions/[^/]+/resourceGroups/[^/]+/providers/Microsoft.KeyVault/vaults/[^/]+$", var.fusion_key_vault_id)) &&
-        can(regex("^https://[a-zA-Z0-9-]+\\.vault\\.azure\\.net/secrets/[^/]+(/[^/]+)?$", var.fusion_github_token_secret_id)) &&
-        can(regex("^https://[a-zA-Z0-9-]+\\.vault\\.azure\\.net/secrets/[^/]+(/[^/]+)?$", var.fusion_mcp_token_secret_id))
+        can(regex("^/subscriptions/[^/]+/resourceGroups/[^/]+/providers/Microsoft.KeyVault/vaults/[a-zA-Z0-9-]+$", var.fusion_key_vault_id)) &&
+        alltrue([for uri in concat([var.fusion_service_token_secret_id], [for user in values(var.fusion_users) : user.github_token_secret_id]) :
+          can(regex("^https://[a-zA-Z0-9-]+\\.vault\\.azure\\.net/secrets/[a-zA-Z0-9-]+(/[a-zA-Z0-9-]+)?$", uri)) &&
+          try(lower(split("/", uri)[2]) == "${lower(local.fusion_vault_name)}.vault.azure.net", false)
+        ])
       )
-      error_message = "Fusion is single-user only: provide its owner, immutable image, vault resource ID and two existing Key Vault secret URIs."
+      error_message = "Fusion is required: provide an immutable image and valid existing secret URIs in the declared Key Vault."
     }
     precondition {
       condition     = (var.registry_server == null) == (var.registry_resource_id == null)
@@ -147,7 +147,6 @@ resource "azurerm_user_assigned_identity" "litellm" {
 }
 
 resource "azurerm_user_assigned_identity" "fusion" {
-  count               = local.fusion_configured ? 1 : 0
   name                = "${var.name_prefix}-fusion"
   location            = azurerm_resource_group.this.location
   resource_group_name = azurerm_resource_group.this.name
@@ -172,7 +171,7 @@ resource "azurerm_role_assignment" "fusion_secrets" {
   for_each             = local.fusion_secret_scopes
   scope                = each.value
   role_definition_name = "Key Vault Secrets User"
-  principal_id         = azurerm_user_assigned_identity.fusion[0].principal_id
+  principal_id         = azurerm_user_assigned_identity.fusion.principal_id
 }
 
 resource "azurerm_role_assignment" "registry_litellm" {
@@ -184,17 +183,37 @@ resource "azurerm_role_assignment" "registry_litellm" {
 
 # The gateway guard calls the private service; it never receives the GitHub PAT.
 resource "azurerm_role_assignment" "litellm_fusion_bearer" {
-  count                = var.enable_fusion_fallback && local.fusion_configured ? 1 : 0
-  scope                = local.fusion_secret_scopes["mcp"]
+  scope                = local.fusion_secret_scopes["service"]
   role_definition_name = "Key Vault Secrets User"
   principal_id         = azurerm_user_assigned_identity.litellm.principal_id
 }
 
+resource "azurerm_role_assignment" "fusion_identity_key" {
+  for_each             = { gateway = azurerm_user_assigned_identity.litellm.principal_id, fusion = azurerm_user_assigned_identity.fusion.principal_id }
+  scope                = "${module.key_vault.id}/secrets/fusion-identity-key"
+  role_definition_name = "Key Vault Secrets User"
+  principal_id         = each.value
+}
+
+# Preserve existing optional deployment addresses when adopting mandatory Fusion.
+moved {
+  from = azurerm_user_assigned_identity.fusion[0]
+  to   = azurerm_user_assigned_identity.fusion
+}
+moved {
+  from = azurerm_role_assignment.litellm_fusion_bearer[0]
+  to   = azurerm_role_assignment.litellm_fusion_bearer
+}
+moved {
+  from = azurerm_role_assignment.fusion_secrets["mcp"]
+  to   = azurerm_role_assignment.fusion_secrets["service"]
+}
+
 resource "azurerm_role_assignment" "registry_fusion" {
-  count                = local.fusion_configured && var.registry_resource_id != null ? 1 : 0
+  count                = var.registry_resource_id != null ? 1 : 0
   scope                = var.registry_resource_id
   role_definition_name = "AcrPull"
-  principal_id         = azurerm_user_assigned_identity.fusion[0].principal_id
+  principal_id         = azurerm_user_assigned_identity.fusion.principal_id
 }
 
 module "container_apps" {
@@ -216,29 +235,25 @@ module "container_apps" {
   litellm_max_replicas           = var.litellm_max_replicas
   litellm_http_concurrency       = var.litellm_http_concurrency
   litellm_log_level              = var.litellm_log_level
-  copilot_only_models            = var.copilot_only_models
   gateway_allowed_cidrs          = var.gateway_allowed_cidrs
-  enable_fusion                  = local.fusion_configured
-  enable_fusion_fallback         = var.enable_fusion_fallback && local.fusion_configured
-  fusion_guard_source            = var.enable_fusion_fallback && local.fusion_configured ? file("${path.module}/../../services/litellm-fusion-guard/fusion_fallback_guard.py") : null
-  fusion_identity_id             = local.fusion_configured ? azurerm_user_assigned_identity.fusion[0].id : null
+  fusion_guard_source            = file("${path.module}/../../services/litellm-fusion-gateway/fusion_gateway_guard.py")
+  fusion_identity_id             = azurerm_user_assigned_identity.fusion.id
   fusion_image                   = var.fusion_image
-  fusion_single_user_subject     = var.fusion_single_user_subject
-  fusion_github_token_secret_id  = var.fusion_github_token_secret_id
-  fusion_mcp_token_secret_id     = var.fusion_mcp_token_secret_id
+  fusion_users                   = var.fusion_users
+  fusion_service_token_secret_id = var.fusion_service_token_secret_id
+  fusion_identity_key_secret_id  = module.key_vault.fusion_identity_key_secret_id
   fusion_cpu                     = var.fusion_cpu
   fusion_memory                  = var.fusion_memory
   fusion_min_replicas            = var.fusion_min_replicas
   fusion_max_replicas            = var.fusion_max_replicas
   fusion_timeout_seconds         = var.fusion_timeout_seconds
-  fusion_primary_timeout_seconds = var.fusion_primary_timeout_seconds
   fusion_max_concurrency         = var.fusion_max_concurrency
   registry_server                = var.registry_server
   tags                           = local.tags
 
   depends_on = [terraform_data.requirements, azurerm_role_assignment.litellm_secrets,
     azurerm_role_assignment.external_database, azurerm_role_assignment.fusion_secrets,
-    azurerm_role_assignment.litellm_fusion_bearer,
+    azurerm_role_assignment.litellm_fusion_bearer, azurerm_role_assignment.fusion_identity_key,
   azurerm_role_assignment.registry_litellm, azurerm_role_assignment.registry_fusion]
 }
 

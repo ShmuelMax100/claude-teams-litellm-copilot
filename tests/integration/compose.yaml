@@ -1,4 +1,4 @@
-# Isolated synthetic test only. No ports, volumes or credentials from pilot/.
+# Synthetic integration only: no cloud resources, real credentials or provider egress.
 services:
   db:
     image: postgres:16-alpine@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
@@ -9,36 +9,25 @@ services:
       interval: 2s
       timeout: 2s
       retries: 30
-  fixture:
-    image: python:3.11-slim@sha256:ef442c44cde6d7aec39ae63dad1ced44fa7290790d68c028686cdd2e31a76a95
-    command: [python, /fixture.py]
-    volumes: [../../pilot/fixture.py:/fixture.py:ro]
-    read_only: true
-  primary:
-    image: python:3.11-slim@sha256:ef442c44cde6d7aec39ae63dad1ced44fa7290790d68c028686cdd2e31a76a95
-    command: [python, /fallback_provider.py]
-    volumes: [./fallback_provider.py:/fallback_provider.py:ro]
-    read_only: true
   gateway:
     image: ghcr.io/berriai/litellm:v1.108.0@sha256:c560d317136880ea92d62334d4367ab10955b1af189dd3ea24f6551290b1d6c1
     env_file: ${FUSION_QA_DIR:?test runner required}/gateway.env
     command: [--config, /qa/config.json, --port, '4000']
     volumes:
       - ${FUSION_QA_DIR:?test runner required}/config.json:/qa/config.json:ro
-      - ../../services/litellm-fusion-guard/fusion_fallback_guard.py:/qa/fusion_fallback_guard.py:ro
+      - ../../services/litellm-fusion-gateway/fusion_gateway_guard.py:/qa/fusion_gateway_guard.py:ro
     depends_on:
       db:
         condition: service_healthy
   fusion:
     image: ${FUSION_QA_IMAGE:-fusion-mcp:local}
-    # Loopback HTTP satisfies the real onboarding endpoint validator. The public
-    # deployment uses HTTPS; both applications share this test network namespace.
     network_mode: service:gateway
     env_file: ${FUSION_QA_DIR:?test runner required}/fusion.env
     command: [python, /qa/sdk_entrypoint.py]
     volumes:
       - ./sdk_entrypoint.py:/qa/sdk_entrypoint.py:ro
       - ./fake_sdk.py:/qa/fake_sdk.py:ro
+      - ./cancel_probe.py:/qa/cancel_probe.py:ro
     read_only: true
     tmpfs: /tmp
     depends_on: [gateway]
@@ -52,6 +41,5 @@ services:
     depends_on: [gateway, fusion]
 networks:
   default:
-    # All calls stay in this synthetic fixture. Provider/telemetry egress is blocked.
     internal: true
   ingress: {}

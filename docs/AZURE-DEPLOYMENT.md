@@ -1,247 +1,58 @@
-# Optional Azure deployment
+# Azure deployment
 
-Existing gateway users can continue with `./setup admin`; they do not need Azure
-or Terraform. This guide creates a new gateway with the repository's audited
-official LiteLLM 1.108.0 image. Fusion is optional and disabled by default.
+The supported deployment always includes two applications in one Azure Container Apps environment: public LiteLLM and private Fusion. PostgreSQL is persistent and privately networked; Key Vault and managed identities supply the required secrets. There is no deployment option that omits Fusion or enables another model provider.
 
-The optional service uses Copilot SDK 2.0.1 and its bundled native runtime.
-Local SDK startup is verified; live entitlement/inference and Azure deployment
-remain separate operator checks. See [automatic fallback](FUSION-FALLBACK.md)
-for the accepted Claude-primary context handoff.
+## Prerequisites
 
-## Before deployment
+- An approved Azure subscription and region with ACA, Key Vault and PostgreSQL capacity. Terraform 1.11+; CI pins 1.16.5 and the checked-in provider lock.
+- Azure CLI authentication and permission to create the reviewed resources and individual role assignments.
+- Docker and a container registry for a Linux AMD64 Fusion image. ACA's standard environment uses Linux AMD64; the image also supports ARM64 for local testing.
+- An existing Key Vault containing an independent service token and one distinct fine-grained GitHub PAT for each approved user. Each PAT needs Copilot Requests permission, an actual expiry date and that user's Fusion entitlement. A Claude Teams subscription does not supply this entitlement.
+- A stable LiteLLM user ID for each credential binding. Do not use one GitHub account or PAT for a multi-user deployment.
 
-Use Terraform 1.7 or newer, Azure CLI authentication, an approved subscription,
-and an identity allowed to create resources and role assignments. Review the
-provider and Terraform constraints in `infra/terraform/versions.tf`. Choose a
-region that supports your desired Container Apps and PostgreSQL SKUs.
-
-Decide the resource prefix, region, ownership/cost tags, database backup policy
-and network access. Private-only environments require a customer VPN/peering
-and DNS path before developers can reach the gateway. Default mode exposes only
-the authenticated LiteLLM HTTPS endpoint; PostgreSQL and Fusion stay private.
-
-Configure encrypted remote Terraform state with access controls and locking
-using your organization's backend. A backend is deliberately not hardcoded to
-a customer account. Local state is acceptable only for a protected POC: state
-and plans contain generated secret values. Do not upload them as public CI
-artifacts or commit them.
-
-## Deploy LiteLLM
+Build from the pinned SDK/runtime sources, then publish to your approved registry and record the resulting immutable image digest:
 
 ```sh
-cd infra/terraform
-cp terraform.tfvars.example terraform.tfvars
-# Edit subscription_id, name_prefix, region and ownership tags.
-terraform init
-terraform fmt -check -recursive
-terraform validate
-terraform plan -out=deployment.tfplan
-# Review resource additions, replacements and recurring costs first.
-terraform apply deployment.tfplan
-terraform output -raw gateway_url
+docker build --platform linux/amd64 -t fusion-mcp:reviewed services/fusion-mcp
 ```
 
-Alternatively, the optional helper can select an enabled Azure subscription
-from `az account list` and save private variables without deploying:
+The SDK and native runtime are inside the Fusion image. No Copilot CLI installation on the developer's machine or a CLI `--fusion-tier` flag is required. Image build verifies the recorded dependency/runtime hashes; no SDK/runtime download occurs during a model request.
+
+## Configure and review
+
+Copy `infra/terraform/terraform.tfvars.example` to a protected ignored path under `private/azure/`, then replace every placeholder. Required Fusion values are `fusion_image`, `fusion_key_vault_id`, `fusion_service_token_secret_id` and `fusion_users`. A user entry holds a Key Vault secret URI and actual PAT expiry in Unix seconds, never the token value. The example expiry `0` intentionally fails validation.
+
+The credential vault must match the referenced PAT and service-token URIs. Distinct users need distinct secret scopes even when secret versions differ. Terraform rejects reuse, expired entries and overlap with the service token. It generates a separate signing secret in the deployment vault. Gateway identity access excludes all user PATs; Fusion gets only the named secret scopes.
 
 ```sh
-./setup azure configure --name-prefix litellm-dev --owner platform-team
-./setup azure plan
-# Review the saved plan with the displayed terraform show command.
-./setup azure apply
+./setup azure plan --var-file private/azure/deployment.tfvars.json
+```
+
+The helper expects JSON when using the `.tfvars.json` extension. Use a `.tfvars` path for the HCL example, or use `./setup azure configure --help` to generate JSON with all mandatory Fusion inputs. Review the saved plan locally before applying. The plan and Terraform state contain secrets; keep them private. A shared deployment should configure an encrypted, access-controlled remote state backend before applying.
+
+```sh
+./setup azure apply --plan-file private/azure/deployment.tfplan
 ./setup azure outputs
 ```
 
-Run these helper commands from the repository root. `apply` requires the exact
-confirmation `APPLY` and uses the saved plan. `configure` also accepts explicit
-`--subscription-id`, `--location` and `--out`; it does not change Azure CLI's
-selected account. The resource group is derived from `name_prefix`.
+Apply creates billable resources and requires an explicit operator decision. This source revision does not run apply or change existing Azure resources. Follow [administrator setup](ADMINISTRATOR.md) after deployment and issue personal invitations before connecting Claude Code.
 
-These commands are operator instructions; this implementation does not run
-`plan` against Azure or apply infrastructure automatically. The plan is a
-sensitive file. Never use `terraform destroy` as routine onboarding or cleanup.
+## Runtime and network
 
-The root module provisions a resource group, Log Analytics, a VNet-integrated
-Container Apps environment, LiteLLM, Key Vault and separate managed identities.
-The managed PostgreSQL option creates a private Flexible Server, delegated
-subnet and private DNS. LiteLLM receives a mounted configuration with persistent
-model storage and secret-backed environment settings. The normal LiteLLM image
-startup performs its supported database schema initialization/migrations;
-readiness must pass before onboarding.
+Only LiteLLM has external HTTPS ingress. Fusion uses internal ingress in the same environment. The gateway holds the service/signing secrets; the Fusion application receives per-user secrets through Key Vault references and a nonsecret binding map. SDK sessions run with explicit user credentials in empty mode.
 
-The native Secret volume mounts **all LiteLLM app secrets** as files alongside
-the nonsecret configuration. The same trusted container also receives them as
-environment variables; do not add untrusted sidecars or expose this mount.
+The generated static catalog contains only `custom_openai/fusion-standard`, `custom_openai/fusion-high` and `custom_openai/fusion-max`. Database-managed model storage is disabled. The mandatory callback derives the user identity after key validation, fixes the private destination and rejects provider overrides. Gateway retries and all failover policies are disabled.
 
-On a fresh deployment, Key Vault RBAC can take several minutes to propagate
-after Terraform creates the role assignment. The pinned provider can return 403
-during this interval. Wait up to five minutes, verify the intended role and
-identity, create and review a **fresh plan**, then apply again. Terraform retains
-completed resources and generated secrets in its state. Do not reuse a stale
-saved plan, destroy resources, broaden permissions or disable RBAC to bypass
-this timing issue. If 403 persists, diagnose tenant/identity/network policy.
+Warm replicas reduce startup delay and incur ongoing charges. Defaults are one warm Fusion replica and at least one gateway replica; PostgreSQL, monitoring and the registry have their own charges. Review current regional pricing and a fresh plan for the chosen subscription. This guide does not estimate exact cost.
 
-Use the HTTPS `gateway_url` output with `./setup admin`. Retrieve the generated
-master key from the reported Key Vault using the Azure portal or your approved
-secret manager, then enter it at the setup wizard's hidden prompt. Do not place
-the key in a shell command, invitation, ticket or Terraform output.
+[ACA HTTP ingress has a 240-second timeout](https://learn.microsoft.com/en-us/azure/container-apps/ingress-overview). Fusion execution is at most 210 seconds; the gateway adds 20 seconds of transport/cleanup margin. Long-running work beyond that limit returns an error. Startup, readiness and liveness probes remain separate. A user's expired token does not restart the shared service; an unrecoverable runtime/cleanup failure does.
 
-```sh
-cd ../..
-./setup admin
-```
+[Versionless Key Vault references refresh within 30 minutes and restart affected revisions](https://learn.microsoft.com/en-us/azure/container-apps/manage-secrets). Updating an app secret directly also needs a revision restart. Revoke a compromised PAT at GitHub immediately instead of relying on the refresh schedule.
 
-Prepare the gateway, create a private developer invitation and complete the
-existing developer flow. Database persistence is required for model registration,
-keys and encrypted personal Copilot connections. For copilot-only mode, follow
-[its active configuration audit](COPILOT-ONLY.md); API-only route creation still
-cannot replace the explicit per-user marker required by the pinned version.
+## Migration from the previous deployment
 
-## Deployment switches
+Regenerate variable files and saved plans. The old optional-Fusion, single-owner and provider-failover flags no longer exist. Terraform includes moved blocks for the former counted Fusion application, identity and service-secret role addresses. The old owner PAT grant is replaced by user-specific grants; inspect those IAM changes in the plan.
 
-| Variable | Default | Meaning |
-|---|---|---|
-| `enable_managed_postgresql` | `true` | Create private PostgreSQL Flexible Server |
-| `enable_private_networking` | `false` | Make the entire ACA environment internal when enabled |
-| `enable_fusion_mcp` | `false` | Add the single-user Fusion app after its prerequisites are supplied |
-| `enable_fusion_fallback` | `false` | Enable private inference handoff and mount the LiteLLM guard; requires Fusion |
-| `fusion_min_replicas` | `1` | Warm runtime when Fusion is enabled; `0` permits cold starts |
-| `fusion_timeout_seconds` | `120` | Task deadline, at most `210` in Azure |
-| `fusion_primary_timeout_seconds` | `60` | Primary deadline for the optional fallback route |
-| `subscription_id` | required | Operator-selected subscription |
-| `name_prefix` | required | 3–16 lowercase characters; start with a letter, end with a letter/digit |
-| `location` | `westeurope` | Region; verify subscription availability |
-| `tags` | development values | Replace owner/environment with accountable customer values |
+Revoke obsolete gateway keys/provider connections, review stored database records and redeploy the static catalog and mandatory guard. Existing database routes cannot authorize a non-Fusion request through the guard. Issue fresh `fusion-gateway-v1` invitations; old invitations are rejected. Remove obsolete provider secrets only after confirming no other application owns them.
 
-CPU, memory, replicas, HTTP concurrency, database SKU/storage/retention and log
-retention are configurable. Inspect the variable descriptions and the saved
-plan; development defaults do not constitute a production availability target.
-
-`litellm_log_level` controls operational logs; prompt logging is disabled while
-metadata spend/routing logs remain available. `copilot_only_models` accepts an
-optional alias-to-model map for explicit file-managed per-user Copilot routes.
-It is empty by default. After selecting entitled models, apply the configuration
-and export/audit the active JSON configuration as required by COPILOT-ONLY.md.
-
-```sh
-terraform -chdir=infra/terraform output -raw gateway_config_json > /secure/active-config.json
-```
-
-This output contains environment references, not credential values. Use the
-export from the active deployment, not a separately generated route fragment.
-
-For an existing database, set `enable_managed_postgresql=false`,
-`external_database_secret_id` to its Key Vault secret URI, and
-`external_database_key_vault_id` to that vault's resource ID. Store a PostgreSQL
-URL with TLS required in the secret. The operator must ensure the database
-network/DNS path is reachable from ACA and allow schema migration permissions.
-No database password belongs in Git or a command-line argument.
-
-Changing the database mode, resource prefix, network topology or private-only
-setting can replace resources. Treat a plan showing a database replacement as
-a data migration, with backup and recovery steps completed first.
-
-## Add optional Fusion
-
-First read [Fusion setup and current limitations](FUSION-MCP.md) and
-[identity boundaries](SECURITY.md). Prepare a reviewed container image and
-publish it to your approved registry. Publishing/deployment is a separate
-operator action; a local Docker build does not publish anything.
-
-Enable Fusion only after supplying:
-
-- `fusion_image`: immutable image reference ending in `@sha256:<digest>`.
-- `fusion_single_user_subject`: the one existing LiteLLM user ID allowed to use
-  the POC. It must match gateway registration/enrollment.
-- `fusion_github_token_secret_id`: Key Vault URI for that user's fine-grained PAT.
-- `fusion_mcp_token_secret_id`: Key Vault URI for a separate random service bearer
-  of at least 32 characters.
-- `fusion_key_vault_id`: resource ID of the vault containing those secrets.
-
-Set `enable_fusion_mcp=true`, review a new plan and apply it explicitly. The
-output `fusion_mcp_url` is internal to the ACA environment. Register it from the
-LiteLLM administrator workflow; developer machines connect to LiteLLM `/mcp`,
-not directly to the private service. For a private ACR, supply `registry_server`
-and `registry_resource_id` for managed-identity pull access.
-
-Readiness checks local SDK process/protocol health without inference. It does
-not establish Fusion availability, account entitlement or enterprise policy.
-The enabled service defaults to one warm replica (maximum one), with a separate
-startup allowance, process liveness and SDK readiness. Set minimum replicas to
-zero only when cold-start latency is acceptable. Warm capacity incurs idle cost.
-
-For automatic fallback also set `enable_fusion_fallback=true`. Terraform mounts
-the checked-in guard source in the LiteLLM container, adds its callback to the
-configuration and sets the owner/private API base/budgets. Source changes trigger
-a new revision. LiteLLM gets Key Vault read access to the independent MCP service
-bearer **only**, never the GitHub PAT. Secret references resolving to the same
-secret scope are rejected. Enroll the owner using the separate
-[fallback commands](FUSION-FALLBACK.md) after the reviewed deployment is healthy.
-
-ACA HTTP ingress has a 240-second request deadline. MCP defaults are 120 seconds
-in the service and 150 seconds in MCP registration. Automatic fallback reserves
-60 seconds for the primary and `fusion_timeout_seconds + 20` for the adapter
-(default 140). Terraform and the guard reject combined budgets over 230 seconds,
-leaving ingress overhead. The standalone service's 1800-second maximum is not
-supported through this Azure HTTP path. Limits do not guarantee fast responses:
-networking, failure detection, cleanup and generation still take time.
-
-## Recovery, upgrades and costs
-
-Managed PostgreSQL backup retention is configurable. Before production, perform
-a point-in-time restore drill into a separate server and test reconnecting the
-gateway. Retain the matching LiteLLM encryption salt securely with the recovery
-procedure. Regional recovery and zone-redundant availability require explicit
-customer planning and suitable SKUs; this POC does not promise them.
-
-For upgrades, pin a reviewed image/digest, run the complete local test suite,
-back up the database, review migration compatibility and test a staging revision.
-Keep the previous image and configuration. Rolling back an image does not undo
-database migrations; use the vendor-supported recovery path when schemas change.
-Never rotate the salt casually to fix an upgrade problem.
-
-To disable Fusion, revoke its dedicated keys/remove the optional registration,
-then set both `enable_fusion_fallback=false` and `enable_fusion_mcp=false`,
-review the plan and apply it. The plan should
-remove only Fusion resources and related permissions while retaining LiteLLM
-and its database. Local client uninstall is separate from access revocation.
-
-Costs include persistent PostgreSQL compute/storage/backups, ACA usage/minimum
-replicas, VNet environment platform-managed load balancer/public IP resources,
-Log Analytics ingestion/retention, Key Vault operations and any selected private
-registry/networking. GitHub Fusion requests consume applicable Copilot usage.
-No NAT Gateway, Azure Firewall, paid dedicated workload profile or new ACR is
-required by default. Check current regional prices in the
-[Azure pricing calculator](https://azure.microsoft.com/pricing/calculator/)
-and configure budgets before deployment; no fixed bill is promised here.
-
-Key Vault retains its RBAC-protected public service endpoint. Private-only ACA
-does not automatically make every supporting Azure service endpoint private.
-Private endpoints, restrictive vault networking, zone redundancy, enterprise
-identity delegation and regional recovery require a separate production design.
-
-## Safe validation
-
-Run Terraform formatting, validation and mocked plan tests without Azure:
-
-```sh
-cd infra/terraform
-terraform init -backend=false
-terraform fmt -check -recursive
-terraform validate
-terraform test
-```
-
-After an operator-approved deployment, confirm gateway liveness/readiness,
-database connectivity and model-list access without running provider inference.
-Then complete [deployment validation](VALIDATION.md). Model calls and GitHub
-consent are explicit later steps, not health probes. No Azure deployment was
-performed as part of the repository implementation.
-
-## References
-
-- [ACA ingress](https://learn.microsoft.com/en-us/azure/container-apps/ingress-overview)
-- [ACA VNet configuration and managed resource costs](https://learn.microsoft.com/en-us/azure/container-apps/custom-virtual-networks)
-- [ACA Key Vault references](https://learn.microsoft.com/en-us/azure/container-apps/manage-secrets)
-- [PostgreSQL private networking](https://learn.microsoft.com/en-us/azure/postgresql/network/concepts-networking-private)
+A prior regional denial is not fixed by changing source. The recorded West Europe deployment attempt did not create a running gateway. Region selection or quota/access approval remains an operator prerequisite; this revision does not select or deploy another region.

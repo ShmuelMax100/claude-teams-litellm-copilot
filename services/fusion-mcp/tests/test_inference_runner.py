@@ -14,11 +14,8 @@ def request(**changes):
                   ToolDefinition('Bash', 'Run a local command', {'type': 'object'})), **changes})
 
 
-async def test_completion_opt_in_and_complete_parallel_tool_batch(config, factory, monkeypatch):
-    denied = CopilotRunner(config, client_factory=factory)
-    assert (await denied.complete(request())).status == 'fallback_disabled'
-    assert not factory.clients
-    runner = CopilotRunner(replace(config, enable_fallback=True), client_factory=factory)
+async def test_completion_direct_and_complete_parallel_tool_batch(config, factory, monkeypatch):
+    runner = CopilotRunner(config, client_factory=factory)
     await runner.probe()
     async def send(session, prompt):
         assert '@notes.md' in prompt
@@ -51,7 +48,7 @@ async def test_completion_opt_in_and_complete_parallel_tool_batch(config, factor
      SimpleNamespace(name='fusion_caller_1', tool_call_id='one', arguments={})],
 ])
 async def test_invalid_tool_batch_is_rejected(config, factory, monkeypatch, requests):
-    runner = CopilotRunner(replace(config, enable_fallback=True), client_factory=factory)
+    runner = CopilotRunner(config, client_factory=factory)
     await runner.probe()
     async def send(session, prompt):
         session.emit('assistant.message', content='', tool_requests=requests)
@@ -62,7 +59,7 @@ async def test_invalid_tool_batch_is_rejected(config, factory, monkeypatch, requ
 
 
 async def test_context_bounds_are_separate_from_mcp_prompt_syntax(config, factory):
-    runner = CopilotRunner(replace(config, enable_fallback=True, max_input_chars=4), client_factory=factory)
+    runner = CopilotRunner(replace(config, max_input_chars=4), client_factory=factory)
     await runner.probe()
     result = await runner.complete(request(tools=()))
     assert result.ok and result.usage is None
@@ -73,23 +70,23 @@ async def test_context_bounds_are_separate_from_mcp_prompt_syntax(config, factor
 
 @pytest.mark.parametrize('where', ['arguments', 'id', 'name'])
 async def test_tool_credential_echo_is_rejected(config, factory, monkeypatch, where):
-    runner = CopilotRunner(replace(config, enable_fallback=True), client_factory=factory)
+    runner = CopilotRunner(config, client_factory=factory)
     await runner.probe()
     async def send(session, prompt):
         session.emit('assistant.message', content='', tool_requests=[SimpleNamespace(
             name='fusion_caller_0',
-            tool_call_id=config.github_token if where == 'id' else 'call-1',
-            arguments={'text': config.github_token} if where == 'arguments' else {})])
+            tool_call_id=config.credentials["owner-user-id"].token if where == 'id' else 'call-1',
+            arguments={'text': config.credentials["owner-user-id"].token} if where == 'arguments' else {})])
     monkeypatch.setattr(FakeSession, 'send', send)
-    tool = ToolDefinition(config.github_token if where == 'name' else 'Read', 'Caller tool', {'type': 'object'})
+    tool = ToolDefinition(config.credentials["owner-user-id"].token if where == 'name' else 'Read', 'Caller tool', {'type': 'object'})
     result = await runner.complete(request(tools=(tool,)))
     assert not result.ok and result.status == 'provider_error' and not result.tool_calls
-    assert config.github_token not in result.model_dump_json()
+    assert config.credentials["owner-user-id"].token not in result.model_dump_json()
     await runner.close()
 
 
 async def test_output_limit_counts_complete_tool_payload(config, factory, monkeypatch):
-    runner = CopilotRunner(replace(config, enable_fallback=True, max_output_bytes=128), client_factory=factory)
+    runner = CopilotRunner(replace(config, max_output_bytes=128), client_factory=factory)
     await runner.probe()
     async def send(session, prompt):
         session.emit('assistant.message', content='', tool_requests=[SimpleNamespace(

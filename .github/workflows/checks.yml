@@ -65,11 +65,11 @@ jobs:
           --env PYTHONPATH=/app
           --mount type=bind,src="$PWD/services/fusion-mcp/tests/runtime_contract_probe.py",dst=/qa/runtime_contract_probe.py,readonly
           fusion-mcp:local python /qa/runtime_contract_probe.py
-      - name: Verify pinned LiteLLM fallback hooks and credential isolation
+      - name: Verify pinned LiteLLM direct-route hooks and credential isolation
         run: >-
           timeout --kill-after=10s 120s docker run --rm --network none --entrypoint python
-          --mount type=bind,src="$PWD/services/litellm-fusion-guard",dst=/qa,readonly
+          --mount type=bind,src="$PWD/services/litellm-fusion-gateway",dst=/qa,readonly
           ghcr.io/berriai/litellm:v1.108.0@sha256:c560d317136880ea92d62334d4367ab10955b1af189dd3ea24f6551290b1d6c1
           /qa/check_runtime.py
-      - name: Test the pinned gateway with synthetic providers
+      - name: Test the pinned gateway with isolated synthetic Fusion
         run: python3 tests/integration/run.py

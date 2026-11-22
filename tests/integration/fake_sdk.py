@@ -5,6 +5,7 @@ Only the external Copilot SDK client is substituted in the test entrypoint.
 """
 import asyncio
 import json
+import hashlib
 from pathlib import Path
 from types import SimpleNamespace
 import uuid
@@ -71,6 +72,7 @@ class FakeSession:
         self.disconnected = False
         self.tier = options.get('github', {}).get('capi', {}).get('fusion_tier')
         self.client.record('create', session_id=self.session_id, tier=self.tier,
+                           credential_hash=hashlib.sha256(options['github']['token'].encode()).hexdigest(),
                            working_directory=options.get('working_directory'))
 
     def on(self, callback):
@@ -98,19 +100,36 @@ class FakeSession:
                 self.emit('external_tool.requested', request_id='pending', tool_call_id='call_fixture_read',
                           session_id=self.session_id, tool_name=definitions[0].name, arguments={'path': 'src/example.py'})
                 return
-            if prompt in ('synthetic-timeout', 'synthetic-cancel'):
+            if 'synthetic-disconnect' in prompt:
+                self.emit('assistant.message_delta', delta_content='SYNTHETIC_DISCONNECT_' + 'a' * 160)
+                self.client.record('first_delta', session_id=self.session_id)
                 await asyncio.Event().wait()
-            elif prompt == 'synthetic-provider-failure':
+            if 'synthetic-timeout' in prompt or 'synthetic-cancel' in prompt:
+                await asyncio.Event().wait()
+            elif 'synthetic-provider-failure' in prompt:
                 self.emit('session.error', message=self.options['github']['token'], error_type='provider')
+            elif 'synthetic-auth-failure' in prompt:
+                self.emit('session.error', message='authentication expired', error_type='authentication')
+            elif 'synthetic-slow-stream' in prompt or 'synthetic-stream-failure' in prompt:
+                output = 'SYNTHETIC_STREAM_' + 'a' * 160
+                self.emit('assistant.message_delta', delta_content=output)
+                self.client.record('first_delta', session_id=self.session_id)
+                await asyncio.sleep(1.5)
+                if 'synthetic-stream-failure' in prompt:
+                    self.emit('session.error', message='synthetic error', error_type='provider')
+                else:
+                    self.emit('assistant.message', content=output)
+                    self.emit('session.idle')
+                    self.client.record('completed', session_id=self.session_id)
             else:
                 output = 'SYNTHETIC_FUSION_' + str(self.tier).upper()
                 if 'SYNTHETIC_CLIENT_TOOL_RESULT' in prompt:
                     output = 'SYNTHETIC_TOOL_RESULT_ACCEPTED'
-                if prompt == 'synthetic-redaction':
+                if 'synthetic-redaction' in prompt:
                     output = self.options['github']['token']
-                elif prompt == 'synthetic-overflow':
+                elif 'synthetic-overflow' in prompt:
                     output = 'x' * 300000
-                elif prompt == 'synthetic-tools':
+                elif 'synthetic-tools' in prompt:
                     self.emit('external_tool.requested', request_id='forbidden', tool_call_id='forbidden',
                               session_id=self.session_id, tool_name='shell', arguments={'command': 'id'})
                     return

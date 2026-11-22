@@ -10,8 +10,9 @@ import json
 from pathlib import Path
 import tempfile
 import threading
+import time
 
-from config import Config
+from config import Config, UserCredential
 from copilot_runner import CopilotRunner
 from inference_types import CompletionRequest, ToolDefinition
 from sdk_runtime import create_sdk_client
@@ -57,12 +58,16 @@ async def main():
         canary.write_text('CANARY_MUST_NOT_ENTER_MODEL_CONTEXT')
         server = ThreadingHTTPServer(('127.0.0.1', 0), MockModel)
         threading.Thread(target=server.serve_forever, daemon=True).start()
-        runner = CopilotRunner(Config(workspace_root=base))
+        credential = UserCredential('offline-test', 'github_pat_synthetic_unused', int(time.time()) + 3600)
+        configuration = Config(service_token='synthetic-service-token-xxxxxxxxxxxx',
+            identity_key='synthetic-identity-key-yyyyyyyyyyyyyyyy',
+            credentials={'offline-test': credential}, workspace_root=base / 'requests')
+        runner = CopilotRunner(configuration)
         client = create_sdk_client(runtime_path='/opt/copilot-runtime/copilot-runtime',
             environment=runner.environment(base / 'home'), working_directory=str(base / 'work'),
             base_directory=str(base / 'config'))
         await client.start()
-        options = runner.session_options('standard', 'offline-runtime-contract', base)
+        options = runner.session_options('standard', 'offline-runtime-contract', base, credential)
         local_provider = {'providers': [{'name': 'fixture', 'type': 'openai',
             'wire_api': 'completions', 'base_url': f'http://127.0.0.1:{server.server_port}/v1'}],
             'models': [{'provider': 'fixture', 'id': 'gpt-4o'}]}
@@ -91,26 +96,25 @@ async def main():
                 return await real_create(**configuration)
 
             client.create_session = local_create
-            configuration = Config(auth_mode='single_user', subject='offline-test',
-                github_token='github_pat_synthetic_unused',
-                mcp_token='synthetic-service-token-xxxxxxxxxxxx',
-                workspace_root=base / 'requests', enable_fallback=True)
             handoff = CopilotRunner(configuration)
             handoff.client = client
             handoff.capable, handoff.capability_status = True, 'ready'
             schema = {'type': 'object', 'properties': {'path': {'type': 'string'}}}
+            streamed = []
             reply = await handoff.complete(CompletionRequest(tier='standard',
                 prompt='Return both client tool requests.', system_message='Use the two available tools.',
                 tools=(ToolDefinition('Read', 'Read caller file', schema),
-                       ToolDefinition('Bash', 'Caller command', schema))))
+                       ToolDefinition('Bash', 'Caller command', schema))),
+                credential=credential, on_delta=streamed.append)
             assert reply.ok, reply.status
+            assert ''.join(streamed) == 'offline fixture answer'
             assert reply.finish_reason == 'tool_calls'
             assert [tool.name for tool in reply.tool_calls] == ['Read', 'Bash']
             assert len(MockModel.requests) == 2, 'Unexpected extra provider request'
             assert not list(configuration.workspace_root.iterdir())
             assert not list((base / 'config').rglob('events.jsonl'))
             assert not (base / 'caller-only.txt').exists()
-            print('PASS actual SDK tool batch: two caller declarations; no server handlers; abort/delete before return')
+            print('PASS actual SDK tool batch: real SDK deltas; two caller declarations; no server handlers; abort/delete before return')
         finally:
             if session:
                 await session.disconnect()

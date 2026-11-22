@@ -1,7 +1,14 @@
 import asyncio
 from types import SimpleNamespace
 import pytest
-from config import Config
+from config import Config, UserCredential
+from auth import current_credential
+import base64
+import hashlib
+import hmac
+import json
+import time
+import uuid
 
 
 class FakeSession:
@@ -72,8 +79,8 @@ class FakeClient:
 
 @pytest.fixture
 def config(tmp_path):
-    return Config(auth_mode='single_user', subject='owner-user-id',
-        github_token='github_pat_testonly_0123456789', mcp_token='mcp-test-only-' + 'x' * 32,
+    return Config(service_token='service-test-only-' + 'x' * 32, identity_key='identity-test-only-' + 'y' * 32,
+        credentials={'owner-user-id': UserCredential('owner-user-id', 'github_pat_testonly_0123456789', int(time.time()) + 3600)},
         workspace_root=tmp_path / 'workspaces', timeout_seconds=2)
 
 
@@ -92,3 +99,20 @@ def factory():
 def mock_server_boundary(monkeypatch, factory):
     from copilot_runner import CopilotRunner
     monkeypatch.setattr('server.CopilotRunner', lambda config: CopilotRunner(config, client_factory=factory))
+
+
+def identity_headers(config, subject="owner-user-id", **claims):
+    data = dict(v=1, aud="fusion-mcp", sub=subject, iat=int(time.time()), exp=int(time.time()) + 60, jti=uuid.uuid4().hex)
+    data.update(claims)
+    def encode(value):
+        return base64.urlsafe_b64encode(value).rstrip(b"=").decode()
+    payload = encode(json.dumps(data, separators=(",", ":")).encode())
+    signature = encode(hmac.new(config.identity_key.encode(), ("v1." + payload).encode(), hashlib.sha256).digest())
+    return {"Authorization": "Bearer " + config.service_token, "X-Fusion-Identity": f"v1.{payload}.{signature}"}
+
+
+@pytest.fixture(autouse=True)
+def direct_runner_identity(config):
+    reset = current_credential.set(config.credentials["owner-user-id"])
+    yield
+    current_credential.reset(reset)

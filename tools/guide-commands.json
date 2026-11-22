@@ -1,47 +1,27 @@
 [
   {
-    "id": "cmd-0",
-    "command": "python3 --version",
-    "context": "Terminal"
+    "id": "prepare",
+    "command": "./setup admin prepare --gateway https://gateway.example --upstream https://fusion.internal.example/v1",
+    "context": "Administrator: verify the deployed gateway"
   },
   {
-    "id": "cmd-1",
-    "command": "./setup admin",
-    "context": "Terminal"
+    "id": "enroll",
+    "command": "./setup admin enroll --gateway https://gateway.example --upstream https://fusion.internal.example/v1 --user-id developer-id --github-login developer-login --tier standard --out private/developer.invite.json --apply",
+    "context": "Administrator: issue a personal invitation"
   },
   {
-    "id": "cmd-2",
-    "command": "./setup admin",
-    "context": "Terminal"
+    "id": "join",
+    "command": "./setup developer join --invite /path/to/personal-invitation.json",
+    "context": "Developer: connect Claude Code"
   },
   {
-    "id": "cmd-3",
-    "command": "python3 --version",
-    "context": "Terminal"
-  },
-  {
-    "id": "cmd-4",
-    "command": "claude --version",
-    "context": "Terminal"
-  },
-  {
-    "id": "cmd-5",
-    "command": "./setup developer",
-    "context": "Terminal"
-  },
-  {
-    "id": "cmd-6",
-    "command": "claude",
-    "context": "Terminal"
-  },
-  {
-    "id": "cmd-7",
+    "id": "doctor",
     "command": "./setup doctor",
-    "context": "Terminal"
+    "context": "Developer: check settings and authorization"
   },
   {
-    "id": "cmd-8",
+    "id": "models",
     "command": "./setup models",
-    "context": "Terminal"
+    "context": "List the Fusion tiers"
   }
 ]

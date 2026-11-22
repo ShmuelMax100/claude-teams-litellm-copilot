@@ -1,64 +1,35 @@
-# Administrator guide
+# Administrator setup
 
-## Existing gateway: unchanged default
+Deploy [the required ACA architecture](AZURE-DEPLOYMENT.md) first. Keep the LiteLLM master key private; setup asks for it without echoing it. Static model configuration and the direct-routing guard must already be active. Preparation verifies them and does not add arbitrary providers or enable database-managed model routes.
 
-Run `./setup admin`, prepare the customer gateway and invite each developer.
-Use the existing [invitation example](INVITATION-EXAMPLE.txt). Deliver invitations
-privately; the wizard does not send email. Each invitation contains a personal
-virtual key, never the administrator key or provider token.
+```sh
+./setup admin prepare --gateway https://gateway.example --upstream https://fusion.internal.example/v1
+```
 
-Retain personal Copilot OAuth, the current model catalog and key-level fallback
-policy. Copilot-only mode remains a separate opt-in path described in
-[COPILOT-ONLY.md](COPILOT-ONLY.md). No migration is required for existing users.
+Create a LiteLLM user with an exact stable `user_id` matching the administrator-approved `fusion_users` binding in Terraform. Each user must have their own unexpired GitHub fine-grained PAT with Copilot Requests permission and suitable Copilot/Fusion access. Store the PAT only in that user's Key Vault secret; record its real expiry. Do not reuse a PAT or secret across users.
 
-## New Azure gateway
+Use LiteLLM's administrator-authenticated `POST /user/new` management API with the following body (replace the example identity). Keep the administrator bearer credential outside the request-body file and shell history. An existing user must have `user_role` equal to `internal_user` or `internal_user_viewer`, and administrator-managed `metadata.github_login` matching `--github-login`; enrollment checks both. Disable automatic key generation so only the restricted key created by this package is issued.
 
-Follow [AZURE-DEPLOYMENT.md](AZURE-DEPLOYMENT.md) to select the subscription,
-resource prefix, region, database and network mode. Review Terraform's plan and
-cost implications before applying. The optional command helper is documented by
-`./setup azure --help`; Terraform remains independently runnable.
+```json
+{
+  "user_id": "developer-id",
+  "user_role": "internal_user",
+  "auto_create_key": false,
+  "send_invite_email": false,
+  "models": ["fusion-standard", "fusion-high", "fusion-max"],
+  "metadata": {"github_login": "developer-login"}
+}
+```
 
-Use the output gateway URL with the same administrator wizard. Retrieve the
-master key securely from Key Vault and enter it only at the hidden prompt.
-Validate readiness/database connectivity before model registration. Confirm
-that routes and personal connections survive restart before broader enrollment.
+Issue a personal invitation after reviewing the preview:
 
-## Optional Fusion POC
+```sh
+./setup admin enroll --gateway https://gateway.example --upstream https://fusion.internal.example/v1 --user-id developer-id --github-login developer-login --tier standard --out private/developer.invite.json
+./setup admin enroll --gateway https://gateway.example --upstream https://fusion.internal.example/v1 --user-id developer-id --github-login developer-login --tier standard --out private/developer.invite.json --apply
+```
 
-The service uses the Copilot SDK inside a private Container App. Local runtime
-checks have passed; live entitlement and Azure readiness still require operator
-validation. See [Fusion MCP](FUSION-MCP.md) and
-[Claude-primary automatic fallback](FUSION-FALLBACK.md).
+The key is limited to the chosen Fusion tier and necessary model/key inspection routes. It grants no provider credential-management or public MCP permissions. Invitations contain a gateway credential and must be transferred privately. The GitHub login label is descriptive; the authenticated gateway user ID and approved server binding control credential selection.
 
-Do not enable shared execution for a team. This implementation supports one
-explicit owner, with a separate user-owned GitHub PAT and service bearer.
+Preparation, invitation validation and doctor send no model requests. A live invocation consumes the user's Copilot allowance and is a separate acceptance step.
 
-1. Identify one existing LiteLLM user ID and verify the GitHub PAT belongs to
-   that person. Configure the same service owner; do not trust request headers.
-2. Deploy the authenticated service with internal ingress and approved secrets.
-3. Use `./setup fusion --help` to preview native server registration, then apply
-   the reviewed single-user record. Never use public/passthrough grants.
-4. Enroll only that owner with a new MCP-only key and deliver its private Fusion
-   invitation. Leave all inference invitations and permissions intact.
-5. Verify discovery and unauthorized-key rejection before any opt-in model call.
-
-For automatic fallback, enable the service adapter and pinned LiteLLM guard,
-then use `fallback-register` and `fallback-enroll`. This issues a separate
-inference invitation for the owner and chosen tier; MCP-only enrollment is not
-automatic fallback. The guard accepts only eligible primary failures before
-output. It never transfers Claude credentials to Fusion.
-
-On an existing gateway, inspect all keys, teams/access groups and server grants
-before attaching a static-bearer service. A dedicated single-user POC gateway is
-the simplest boundary. The bearer authenticates the gateway, not an end user.
-
-## Operations
-
-Assign owners for renewal, revocation, backups, restore drills, log retention and
-image upgrades. Keep the LiteLLM salt stable with database backups. Review plans
-that replace persistent resources as migrations. Disable only Fusion when
-removing the optional POC; do not destroy the gateway/database.
-
-Use [validation](VALIDATION.md), [troubleshooting](TROUBLESHOOTING.md) and
-[security](SECURITY.md) for the exact boundaries. Local automated tests do not
-replace Azure networking, organization policy or provider-entitlement checks.
+To offboard a user, revoke their personal gateway keys and GitHub PAT, remove their server binding, then deploy the revised configuration. For rotation, update the user's Key Vault secret and declared expiry. Versionless ACA Key Vault references refresh within approximately 30 minutes and restart affected revisions; use a controlled revision rollout when immediate replacement is required. Revocation at GitHub takes effect independently of secret refresh.

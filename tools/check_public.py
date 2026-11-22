@@ -9,6 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 DENIED_NAMES = {'TEST-RESULTS.json', 'COMMAND-AUDIT.json', 'WALKTHROUGH.txt', '.env'}
 PLACEHOLDERS = ('sk-unit-test-placeholder', 'sk-test-not-a-real-credential')
 CACHE_DIRS = {'.git', '__pycache__', 'dist', '_site', 'private', '.terraform', '.venv', 'venv', '.pytest_cache', 'node_modules'}
+LOCAL_ARTIFACT_SUFFIXES = ('.tfstate', '.tfstate.backup', '.tfplan', '.tfvars', '.tfvars.json')
 PATTERNS = {
     'provider credential': r'\b(?:sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})',
     'private key': r'-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----',
@@ -28,7 +29,10 @@ def source_files():
         pass  # Extracted release packages need no Git installation.
     for directory, names, files in os.walk(ROOT):
         names[:] = [name for name in names if name not in CACHE_DIRS and not (Path(directory) / name).is_symlink()]
-        paths.update(Path(directory) / name for name in files)
+        # Local Terraform execution artifacts are ignored by this repository and
+        # are not distributable source. The tracked-file inventory above still
+        # includes accidentally committed state/plans and reports them below.
+        paths.update(Path(directory) / name for name in files if not name.endswith(LOCAL_ARTIFACT_SUFFIXES))
     return sorted(path for path in paths if path.is_file())
 
 

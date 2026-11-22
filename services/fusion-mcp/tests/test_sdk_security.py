@@ -20,24 +20,25 @@ spec.loader.exec_module(fake_sdk)
 
 
 @pytest.fixture
-def security_config(tmp_path):
-    return Config(auth_mode='single_user', subject='test-owner', github_token='github_pat_security_fixture',
-                  mcp_token='service-auth-fixture-' + 'x' * 32, workspace_root=tmp_path / 'runtime',
-                  copilot_bin=sys.executable, timeout_seconds=1, max_output_bytes=1024)
+def security_config(config, tmp_path):
+    return replace(config, workspace_root=tmp_path / 'runtime', copilot_bin=sys.executable,
+                   timeout_seconds=1, max_output_bytes=1024)
 
 
 async def finish(runner):
     await asyncio.wait_for(runner.close(), timeout=5)
 
 
-async def test_default_disabled_never_constructs_runtime(security_config):
-    factory = fake_sdk.FakeFactory()
-    runner = CopilotRunner(replace(security_config, auth_mode='disabled'), client_factory=factory)
-    await runner.probe()
-    assert (await runner.run('standard', 'hello')).status == 'disabled'
-    assert not factory.clients
-    assert not security_config.workspace_root.exists()
-    await finish(runner)
+async def test_unbound_request_never_constructs_session(security_config):
+    from auth import current_credential
+    reset = current_credential.set(None)
+    try:
+        factory = fake_sdk.FakeFactory()
+        runner = CopilotRunner(security_config, client_factory=factory)
+        assert (await runner.run('standard', 'hello')).status == 'unauthorized'
+        assert not factory.clients and not security_config.workspace_root.exists()
+    finally:
+        current_credential.reset(reset)
 
 
 def test_real_factory_disables_ambient_account_and_coding_agent(security_config, monkeypatch):
@@ -102,8 +103,8 @@ async def test_startup_probe_is_local_and_environment_does_not_inherit_auth(secu
         assert not any(event['phase'] == 'send' for event in client.events)
         environment = client.options['environment']
         assert 'ambient-secret' not in repr(environment)
-        assert security_config.github_token not in repr(environment)
-        assert security_config.mcp_token not in repr(environment)
+        assert security_config.credentials["owner-user-id"].token not in repr(environment)
+        assert security_config.service_token not in repr(environment)
         assert environment['HOME'] != os.environ.get('HOME')
         assert Path(client.options['base_directory']).is_dir()
     finally:
@@ -115,7 +116,7 @@ async def test_failed_probe_does_not_publish_credentials_or_keep_runtime(securit
     factory = fake_sdk.FakeFactory()
 
     async def failed_status(client):
-        raise RuntimeError(security_config.github_token + ' ' + security_config.mcp_token)
+        raise RuntimeError(security_config.credentials["owner-user-id"].token + ' ' + security_config.service_token)
 
     monkeypatch.setattr(fake_sdk.FakeCopilotClient, 'get_status', failed_status)
     runner = CopilotRunner(security_config, client_factory=factory)
@@ -123,7 +124,7 @@ async def test_failed_probe_does_not_publish_credentials_or_keep_runtime(securit
     assert not runner.capable and runner.capability_status == 'runtime_check_failed'
     assert factory.clients[0].stopped == 1 and not factory.clients[0].sessions
     assert not list(security_config.workspace_root.iterdir())
-    assert security_config.github_token not in caplog.text and security_config.mcp_token not in caplog.text
+    assert security_config.credentials["owner-user-id"].token not in caplog.text and security_config.service_token not in caplog.text
     await finish(runner)
 
 
@@ -142,7 +143,7 @@ async def test_requests_share_runtime_but_have_fresh_private_sessions(security_c
         assert len({session.options['working_directory'] for session in client.sessions}) == 2
         for session in client.sessions:
             assert session.options['model'] == 'fusion'
-            assert session.options['github']['token'] == security_config.github_token
+            assert session.options['github']['token'] == security_config.credentials["owner-user-id"].token
             assert session.options['tools']['available_tools'] == []
             assert session.options['tools']['definitions'] == []
             assert session.options['enable_config_discovery'] is False
@@ -169,8 +170,8 @@ async def test_secret_redaction_and_provider_error_recover_without_payload_loggi
         failed = await runner.run('high', 'synthetic-provider-failure')
         assert not failed.ok and failed.status == 'provider_error' and not failed.output
         assert (await runner.run('standard', 'synthetic-example')).ok
-        assert security_config.github_token not in caplog.text
-        assert security_config.mcp_token not in caplog.text
+        assert security_config.credentials["owner-user-id"].token not in caplog.text
+        assert security_config.service_token not in caplog.text
         assert 'synthetic-provider-failure' not in caplog.text
     finally:
         await finish(runner)

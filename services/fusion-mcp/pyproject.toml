@@ -1,7 +1,7 @@
 [project]
 name = "fusion-mcp"
 version = "0.1.0"
-description = "Optional single-user GitHub Copilot Fusion MCP service"
+description = "Per-user GitHub Copilot Fusion model adapter and MCP service"
 requires-python = ">=3.11"
 dependencies = ["mcp==2.3.0", "uvicorn==0.38.0", "microsoft-copilot-sdk==2.0.1", "jsonschema==4.26.0"]
 

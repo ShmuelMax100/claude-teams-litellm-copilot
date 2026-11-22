@@ -3,18 +3,20 @@ import asyncio
 from pathlib import Path
 import sys
 import tempfile
+import time
 
 sys.path.insert(0, '/app')
 
-from config import Config
+from config import Config, UserCredential
 from copilot_runner import CopilotRunner
 
 
 async def main():
     with tempfile.TemporaryDirectory(prefix='sdk-probe-') as temporary:
-        config = Config(auth_mode='single_user', subject='offline-fixture',
-                        github_token='github_pat_offline_fixture',
-                        mcp_token='offline-service-fixture-' + 'x' * 32,
+        credential = UserCredential('offline-fixture', 'github_pat_offline_fixture', int(time.time()) + 3600)
+        config = Config(service_token='offline-service-fixture-' + 'x' * 32,
+                        identity_key='offline-identity-fixture-' + 'y' * 32,
+                        credentials={'offline-fixture': credential},
                         workspace_root=Path(temporary) / 'runtime')
         runner = CopilotRunner(config)
         try:

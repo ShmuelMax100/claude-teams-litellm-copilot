@@ -1,229 +1,36 @@
-# Claude Teams + LiteLLM + GitHub Copilot
+# Claude Code through Fusion on Azure
 
-For direct GitHub Copilot without a Claude subscription or fallback, see the [copilot-only pilot guide](docs/COPILOT-ONLY.md). Use `./setup --mode copilot-only --help`. The original workflow remains the default.
+Claude Code sends every model request to LiteLLM. LiteLLM and the Fusion service run in the same Azure Container Apps environment. The Fusion service invokes GitHub Copilot Fusion through the pinned Copilot SDK. Standard, High and Max select Fusion tiers; GitHub decides the internal models and workflow.
 
-Optional hosting and tools: [deploy LiteLLM on Azure](docs/AZURE-DEPLOYMENT.md),
-[configure the single-user Fusion MCP POC](docs/FUSION-MCP.md), or review the
-[integration architecture](docs/ARCHITECTURE.md) and [security boundaries](docs/SECURITY.md).
-The [implementation report](docs/IMPLEMENTATION-RESULTS.md) lists delivered files,
-test evidence, manual setup steps and production limitations.
-Fusion is disabled by default. The optional service runs **Copilot SDK 2.0.1**
-inside its Container App with a warm, isolated native runtime. A separately
-enrolled owner can use [Claude primary with automatic Fusion fallback](docs/FUSION-FALLBACK.md):
-conversation history becomes context for a fresh task, and Claude Code executes
-tools locally. Fusion uses Copilot entitlement. Local SDK/container checks pass;
-no Azure deployment or live Fusion inference was performed.
+![Claude Code connects to one ACA environment containing LiteLLM and Fusion](diagrams/architecture.svg)
 
-**One onboarding flow. Personal provider identities. Automatic fallback at the gateway.**
+This is the only supported architecture. The former Claude Teams, direct Copilot-provider, Primary/Secondary and automatic failover workflows have been removed. A failed request returns an error. Retries are disabled at the gateway; no alternative provider is configured.
 
-This onboarding package connects Claude Code to an **existing customer LiteLLM gateway**. Requests first use the developer’s eligible Claude Teams subscription. If a mapped primary request fails with an eligible provider error, LiteLLM tries the configured GitHub Copilot model using that developer’s connected account.
+## Start
 
-After onboarding, developers run `claude` normally. They can switch models with `/model`; the gateway owns the fallback policy.
+1. Read [Azure deployment](docs/AZURE-DEPLOYMENT.md). Build the Fusion image, supply one GitHub fine-grained PAT and expiry per user through Key Vault, and deploy the two applications in one ACA environment.
+2. Follow the [administrator guide](docs/ADMINISTRATOR.md) to verify the gateway and issue separate personal invitations.
+3. Follow the [developer guide](docs/DEVELOPER.md): `./setup developer join --invite PATH`, then `./setup doctor`. Onboarding and doctor perform no model inference.
+4. Open `START-HERE.html` for the self-contained setup guide, or run `./setup --help`.
 
-> **Get started:** Administrators configure the gateway and invite developers. Developers connect their accounts once, then use Claude Code normally with automatic fallback managed by LiteLLM.
+Claude Code receives only a personal LiteLLM access key. GitHub tokens remain in the Fusion service. No Claude subscription login, shared GitHub token or provider-connection permission is used.
 
-## Start here
+## How the request works
 
-| Your role | Start with | You need |
-|---|---|---|
-| **Administrator** | `./setup admin` → Prepare customer gateway → Invite a developer | Existing gateway, administrator key, developer work email and GitHub username |
-| **Developer** | `./setup developer` → Join with my invitation | Private invitation, Python 3.10+, Claude Code, your Claude and GitHub accounts |
-| **Reviewer / operator** | [Architecture](#how-requests-flow), [configuration](docs/CONFIGURATION.md), [validation guide](docs/VALIDATION.md) | Read access to this repository |
+LiteLLM translates Anthropic Messages into Chat Completions using its `custom_openai` adapter. The private Fusion model endpoint translates this into an SDK session with `model="fusion"` and the requested tier. SDK text deltas stream back through LiteLLM. Validated tool calls return to Claude Code for local execution; the next request carries their results as context.
 
-### Interactive onboarding guide
+The private `/mcp` endpoint is a separate interface for explicit Fusion task tools. Connecting an MCP server does not create a Claude Code model endpoint. This release does not expose MCP through a shared gateway registration because the pinned LiteLLM MCP lifecycle does not carry the custom delegated identity consistently through initialization, discovery and invocation.
 
-**[Open the onboarding website](https://msftse-org.github.io/claude-teams-litellm-copilot/)** · **[Download the standalone HTML guide](https://github.com/msftse-org/claude-teams-litellm-copilot/releases/latest/download/START-HERE.html)** · **[Download the customer CLI package](https://github.com/msftse-org/claude-teams-litellm-copilot/releases/latest/download/claude-gateway-cli.zip)** · [Guide source file](START-HERE.html)
+## Compatibility boundaries
 
-Open the onboarding website directly in your browser, or download `START-HERE.html` for offline use. The guide runs offline, embeds all three diagrams, and starts with **no role selected**. Choose Administrator or Developer to reveal that role’s four setup steps. A persistent label shows the selected journey; “Change role” switches paths. Shared architecture, model and troubleshooting references remain available.
+This is a protocol adapter, not full Claude model compatibility. [Anthropic does not support routing Claude Code to non-Claude models](https://code.claude.com/docs/en/llm-gateway). The stable SDK cannot import an arbitrary Claude conversation losslessly: assistant and tool history is serialized as task context. Images, audio and unsupported generation/tool options are rejected explicitly. The output byte cap does not cap upstream generation tokens or charges. See [SDK interfaces and limits](docs/SDK-MIGRATION.md).
 
-![Onboarding starts with an explicit administrator or developer choice](docs/onboarding-preview.png)
+## Reference and evidence
 
-The guide, source code and release downloads are public. Each developer’s invitation is a separate private credential and must be delivered through an approved recipient-restricted channel.
+- [Architecture and identity](docs/ARCHITECTURE.md)
+- [Configuration](docs/CONFIGURATION.md) and [security](docs/SECURITY.md)
+- [Troubleshooting](docs/TROUBLESHOOTING.md)
+- [Validation commands and scope](docs/VALIDATION.md)
+- [Implementation results](docs/IMPLEMENTATION-RESULTS.md)
 
-## Administrator journey
-
-From the extracted package or cloned repository folder:
-
-```sh
-python3 --version
-./setup admin
-```
-
-1. **Prepare once.** Enter the gateway HTTPS origin and administrator key. Review and install the model routes and per-user Copilot credential definition. Matching routes are reused; conflicts stop for review.
-2. **Invite each developer.** Enter their work email and exact GitHub username. Select the recommended policy or a different offered backup for each primary family.
-3. **Deliver privately.** Share the package and that developer’s `.invite.json` through a recipient-restricted channel. Use [HANDOFF-TEMPLATE.txt](HANDOFF-TEMPLATE.txt).
-4. **Verify the connection.** Confirm requests and model routing in LiteLLM Logs before inviting the rest of the team.
-
-The email identifies the LiteLLM user and supports repeat enrollment. **No email is sent or verified, and SMTP is not required.** The invitation contains a personal 90-day gateway key. It does not contain the administrator key or provider sign-in tokens. Each developer gets their own file.
-
-### Example: create one developer’s invitation
-
-In the folder containing `setup`, run:
-
-```sh
-./setup admin
-```
-
-Select **2 · Invite a new developer**. Enter your gateway URL and administrator key when prompted, then use your developer’s real details in place of these examples:
-
-| Prompt | Example answer |
-|---|---|
-| Developer work email | `alex@customer.example` |
-| Developer GitHub username | `alex-dev` |
-| Include Copilot Opus? | `no`, unless access is verified |
-| Fallback policy | `1` — Use recommended model mapping |
-| Save private invitation to | Press Enter for `private/alex-dev.invite.json` |
-| Create or reuse this personal 90-day invitation? | `yes` after reviewing the policy |
-
-Expected: **Invitation ready: private/alex-dev.invite.json**. The folder is created automatically and the file has owner-only permissions (600). [View the example dialogue](docs/INVITATION-EXAMPLE.txt); it illustrates interactive answers, not commands to paste into a shell.
-
-Deliver that file privately to Alex. On Alex’s machine, run `./setup developer`, choose **1 · Join with my invitation**, and enter the received file’s location. No email is sent. Repeat with a separate identity and filename for each developer. Reusing a valid invitation preserves its key and original expiry; use a new filename to issue a new 90-day key.
-
-### Existing gateway requirements
-
-- Customer HTTPS origin, PostgreSQL, and `general_settings.store_model_in_db: true`.
-- Administrator access to models, credentials, users and virtual keys.
-- Required egress and developer network access to the gateway and provider sign-in endpoints.
-- The APIs and per-user OAuth behavior validated on **LiteLLM 1.108.0**.
-- A separately eligible Claude seat and Copilot entitlement for every developer.
-
-The default flow configures an existing deployment. The optional
-[`infra/terraform/`](infra/terraform/) path provisions Azure hosting, HTTPS and
-persistent PostgreSQL. SMTP, organization-wide SSO, budgets and production
-availability policies remain operator responsibilities.
-
-## Developer journey
-
-Get the package and your private invitation from the administrator. In the folder containing `setup`:
-
-```sh
-python3 --version
-claude --version
-./setup developer
-```
-
-Choose **Join with my invitation**, provide the invitation file, and sign into the expected accounts when prompted. The wizard validates identity and model access, backs up settings, and configures the gateway. Restart open Claude Code sessions, then:
-
-```sh
-claude
-```
-
-Use these commands to inspect the connection and your live model policy:
-
-```sh
-./setup doctor
-./setup models
-```
-
-No special launcher is needed after joining. The wizard updates `~/.claude/settings.json`, retaining unrelated settings and permissions. Shell, project or managed settings can override user settings; inspect those if traffic takes a different route. Restore is available in the Developer menu and protects later edits.
-
-![Administrator and developer onboarding with private invitation handoff](diagrams/02-onboarding-handoff.png)
-
-## How requests flow
-
-![Claude Code, LiteLLM, Claude Teams and personal GitHub Copilot architecture](diagrams/01-request-architecture.png)
-
-1. Claude Code maintains the developer’s Claude subscription sign-in and sends requests to the customer gateway. A separate personal LiteLLM key identifies the gateway user.
-2. LiteLLM authenticates the key and routes a mapped primary model to Anthropic using the client’s subscription token.
-3. On an eligible failure, LiteLLM applies that key’s fallback mapping and uses the developer’s Copilot connection.
-4. Claude Code receives the response through the same gateway. LiteLLM Logs identify the actual provider, model and fallback attempts.
-
-The default path uses native LiteLLM routes, credentials and key-level router settings with the official gateway image. It covers Claude Teams as primary and personal GitHub Copilot as backup.
-
-Optional Fusion adds a private SDK service and two separately enrolled modes:
-MCP tools through LiteLLM `/mcp`, or automatic Claude-primary fallback through an
-owner-bound guard and context adapter. Both are disabled by default and support
-one declared owner. Existing provider OAuth is never reused by the SDK.
-See [automatic fallback](docs/FUSION-FALLBACK.md) and the
-[extended architecture](docs/ARCHITECTURE.md).
-
-## Models and fallback policy
-
-| Requested primary | Default Copilot backup | Direct backup alias |
-|---|---|---|
-| Sonnet 5.5 — initial default | Sonnet 5.5 | `claude-copilot-sonnet` |
-| Opus 5.5 | Sonnet 5.5 | `claude-copilot-sonnet` |
-| Haiku 5.5 | Haiku 5.5 | `claude-copilot-haiku` |
-| Sonnet 5 | Sonnet 5 | `claude-copilot-sonnet-5` |
-| Haiku 4.5 | Haiku 4.5 | `claude-copilot-haiku-4-5` |
-
-Use `/model` in Claude Code to choose a primary, or enter a direct alias such as `/model claude-copilot-sonnet`. The administrator can choose another offered backup during invitation creation. Optional Copilot Opus requires separately verified access and was **not live-tested** in the test account.
-
-![Primary failure, gateway fallback and response behavior](diagrams/03-fallback-behavior.png)
-
-- Generated keys use `num_retries: 0` and one backup for each mapped primary. General eligible provider failures can trigger fallback; it is not restricted to subscription quota exhaustion.
-- Direct Copilot aliases have no further fallback. If both providers fail, the request fails.
-- These shared routes disable deployment cooldown, so one user’s limit does not cool down the route for everyone. Later requests try the primary again.
-- The primary wildcard can expose additional models; only explicit mappings in the [catalog](_engine/catalog.json) have a configured fallback.
-- Claude Code can continue displaying the requested primary model. Inspect LiteLLM Logs for `attempted_fallbacks`, the actual model, status and request ID.
-- Native WebSearch, partial streams and context limits are not guaranteed to behave identically across providers. Read-tool success is not full tool parity. Optional GitHub MCP search is separate and is not enabled by the wizard.
-
-## Configuration and operations
-
-[Configuration reference](docs/CONFIGURATION.md) explains the models, per-user credential, key policy, client settings and what is stored where. [_engine/catalog.json](_engine/catalog.json) is the checked-in model and fallback source of truth.
-
-| Lifecycle action | Flow |
-|---|---|
-| Add a developer | Admin issues a distinct invitation; developer joins. No gateway redeployment. |
-| Repeat enrollment | Same gateway and normalized email reuse the user. Reusing a valid invitation file reuses its key. |
-| Renew or change policy | Issue a new invitation filename/key, revoke the old key as appropriate, and have the developer join again. |
-| Offboard | Block/delete the developer’s gateway key and review provider access separately. |
-| Restore workstation | Developer menu → Restore previous settings. This does not revoke the key or provider connection. |
-
-## Validation and limitations
-
-Compatibility checks cover macOS, LiteLLM 1.108.0 and Claude Code 2.1.317:
-
-The following live results are the historical legacy validation. New Azure/Fusion
-checks and their limits are recorded separately in [validation](docs/VALIDATION.md).
-
-- **17 automated tests** for onboarding, identity checks, settings merge/restore, malformed invitations and wrapper behavior.
-- Three primary and four direct Copilot model selections responded successfully.
-- After genuine subscription quota exhaustion, **Sonnet, Opus and Haiku all fell back successfully**; gateway records show `attempted_fallbacks=1`. A primary-only diagnostic returned real Anthropic HTTP 429.
-- A Read-tool call and follow-up succeeded through fallback.
-- Live invitation creation and developer validation passed with automatic email explicitly disabled.
-
-See the [validation checklist](docs/VALIDATION.md) and [aggregate compatibility results](VALIDATION.json). Raw provider logs, request IDs and account details are not included. Complete first-time browser consent and verify your organization’s network, policies and required tools during deployment. Read-tool validation does not cover every tool or context size.
-
-Run offline checks without provider credentials (maintainer checks require Python 3.10+ and Node.js for JavaScript syntax validation):
-
-```sh
-python3 -m unittest discover -s tests
-python3 tools/build_guide.py
-python3 tools/check_package.py
-python3 tools/check_public.py
-```
-
-The guide build uses only checked-in sources and embeds the diagram PNGs. Automated checks do not consume provider quota.
-
-## Repository contents
-
-| Path | Purpose |
-|---|---|
-| `setup` | Guided CLI entry point |
-| `_engine/` | Python implementation, explicit model catalog, optional search helper |
-| `START-HERE.html` | Standalone interactive onboarding guide |
-| `tools/` | Reproducible guide build and package checks |
-| `docs/CONFIGURATION.md` | Administrator configuration reference |
-| `diagrams/` | Three architecture PNGs used in this README and guide |
-| `tests/` | Offline tests |
-| `infra/terraform/` | Optional Azure resources, variables and mocked plan tests |
-| `services/fusion-mcp/` | Optional single-owner SDK service, MCP and inference adapter |
-| `services/litellm-fusion-guard/` | Optional owner-bound automatic fallback policy |
-| `tests/integration/` | Fresh local gateway tests with a mock SDK; no provider usage |
-| `docs/AZURE-DEPLOYMENT.md`, `docs/FUSION-MCP.md` | Optional deployment and tool setup |
-| `docs/ARCHITECTURE.md`, `docs/SECURITY.md` | Service contracts, ownership and identity boundaries |
-| `HANDOFF-TEMPLATE.txt` | Private delivery instructions |
-| `VALIDATION.json`, `docs/VALIDATION.md` | Aggregate results and repeatable deployment checks |
-| `IMAGE-PROMPTS.txt` | Architecture image generation provenance |
-
-Private invitation files, environment files and credential files are excluded from version control. Do not commit live keys or tokens.
-
-## References
-
-- [LiteLLM: Claude subscription authentication](https://docs.litellm.ai/docs/tutorials/claude_code_max_subscription)
-- [LiteLLM: GitHub Copilot provider](https://docs.litellm.ai/docs/providers/github_copilot)
-- [LiteLLM: reliability and fallback](https://docs.litellm.ai/docs/proxy/reliability)
-- [LiteLLM: model fallback tutorial](https://docs.litellm.ai/docs/tutorials/model_fallbacks)
-- [LiteLLM: per-key router settings](https://docs.litellm.ai/docs/proxy/keys_teams_router_settings)
-- [Related team example: Claude Code with GitHub Copilot](https://github.com/msftse-org/claude-code-with-github-copilot)
+The checked-in tests use synthetic credentials and network-isolated services. They do not establish live Fusion entitlement or successful cloud deployment. Source changes do not automatically update an existing deployment or this computer's Claude Code settings.

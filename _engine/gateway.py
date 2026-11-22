@@ -43,30 +43,11 @@ def private_write(path,value):
         os.chmod(f.name,0o600); json.dump(value,f,indent=2); f.write('\n'); tmp=f.name
     os.replace(tmp,path)
 
-def load_catalog(include_opus=False,mode="legacy",selections=None):
-    if mode not in ("legacy","copilot-only"):raise Error("Unsupported integration mode.")
-    if mode=="copilot-only":
-        from copilot import catalog
-        return catalog(selections)
-    c=read(Path(__file__).with_name('catalog.json'))
-    omitted=set() if include_opus else set(c['optional_models'])
-    c['models']=[m for m in c['models'] if m['model_name'] not in omitted]
-    # The management API rejects this server-owned parameter in a request body.
-    # Its value is already defined on the stored per-user credential.
-    for model in c['models']:model['litellm_params'].pop('github_copilot_auth_type',None)
-    c['fallbacks']=[e for e in c['fallbacks'] if next(iter(e)) not in omitted]
-    if include_opus:
-        for e in c['fallbacks']:
-            k=next(iter(e))
-            if k.replace('anthropic/','').startswith('claude-opus-'):
-                e[k]=['claude-copilot-opus']
-    return c
+def load_catalog():
+    return read(Path(__file__).with_name('catalog.json'))
+
 
 def key_info(api):
     info=api.call('/key/info').get('info',{})
     if not info.get('user_id'): raise Error('Use a personal LiteLLM key with a user_id, not the master key.')
     return info
-
-def connected(api,credential):
-    return next((x for x in api.call('/credentials/user_connections').get('connections',[])
-                 if x.get('credential_name')==credential and x.get('connected')),None)

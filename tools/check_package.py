@@ -62,7 +62,7 @@ def main():
     assert len(guide.ids) == len(set(guide.ids)), 'Duplicate HTML IDs'
     assert set(guide.anchors) <= set(guide.ids), 'Broken section anchor'
     assert not guide.external, 'Guide must be self-contained'
-    assert len(guide.images) == 3 and all(x.startswith('data:image/png;base64,') for x in guide.images)
+    assert not guide.images and '<svg ' in page, 'Guide must embed its architecture diagram'
     assert {x['data-journey'] for x in guide.journeys} == {'admin', 'developer'}
     assert all('hidden' in x for x in guide.journeys), 'No journey may be selected initially'
     assert len(guide.buttons) == 2 and all(x.get('aria-pressed') == 'false' for x in guide.buttons)

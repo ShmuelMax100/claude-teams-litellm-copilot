@@ -42,14 +42,18 @@ async def test_invalid_prompt(config, factory, prompt):
 
 
 def test_configuration_fails_closed(config):
-    assert Config.from_env({}).auth_mode == 'disabled'
-    for changes in ({'auth_mode': 'multi_user'}, {'github_token': ''}, {'mcp_token': 'short'},
-                    {'github_token': 'ghp_classic'}, {'subject': 'bad\nowner'},
-                    {'mcp_token': config.github_token}, {'allowed_tiers': ('bogus',)}):
+    from config import UserCredential
+    with pytest.raises(ValueError):
+        Config.from_env({})
+    for changes in ({'credentials': {}}, {'service_token': 'short'},
+                    {'identity_key': config.service_token}, {'allowed_tiers': ('bogus',)},
+                    {'timeout_seconds': 211},
+                    {'credentials': {'owner-user-id': UserCredential('owner-user-id', 'ghp_classic', 123)}}):
         with pytest.raises(ValueError): replace(config, **changes)
-    with pytest.raises(ValueError, match='obsolete'):
+    with pytest.raises(ValueError, match='Obsolete'):
         Config.from_env({'FUSION_COPILOT_BIN': 'copilot'})
-    assert config.github_token not in repr(config) and config.mcp_token not in repr(config)
+    assert config.credentials['owner-user-id'].token not in repr(config)
+    assert config.service_token not in repr(config) and config.identity_key not in repr(config)
 
 
 async def test_limits_redaction_and_tool_denial(config, factory, caplog):
@@ -61,7 +65,7 @@ async def test_limits_redaction_and_tool_denial(config, factory, caplog):
         assert result.status == status and not result.output
         assert factory.clients[0].sessions[-1].aborted
     assert (await runner.run('standard', 'secrets')).output == '[REDACTED]'
-    assert config.github_token not in caplog.text
+    assert config.credentials["owner-user-id"].token not in caplog.text
     await runner.close()
 
 
@@ -74,7 +78,7 @@ async def test_concurrency_isolation_and_environment(config, factory, monkeypatc
     assert a.ok and b.ok
     environment = factory.clients[0].options['environment']
     assert not any(k in environment for k in ('GITHUB_TOKEN', 'COPILOT_PROVIDER_API_KEY', 'FUSION_MCP_TOKEN'))
-    assert config.github_token not in str(environment)
+    assert config.credentials["owner-user-id"].token not in str(environment)
     await runner.close()
 
 
@@ -106,11 +110,15 @@ async def test_policy_and_capability_failure(config, factory):
     assert not list(config.workspace_root.iterdir())
 
 
-async def test_disabled_never_starts(config, factory):
-    runner = CopilotRunner(replace(config, auth_mode='disabled'), client_factory=factory)
-    await runner.probe()
-    assert (await runner.run('standard', 'hello')).status == 'disabled'
-    assert not factory.clients and not config.workspace_root.exists()
+async def test_missing_identity_never_starts(config, factory):
+    from auth import current_credential
+    reset = current_credential.set(None)
+    try:
+        runner = CopilotRunner(config, client_factory=factory)
+        assert (await runner.run('standard', 'hello')).status == 'unauthorized'
+        assert not factory.clients and not config.workspace_root.exists()
+    finally:
+        current_credential.reset(reset)
 
 
 async def test_dead_runtime_closes_admission(config, factory):

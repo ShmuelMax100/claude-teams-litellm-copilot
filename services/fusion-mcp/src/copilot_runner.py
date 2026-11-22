@@ -1,4 +1,4 @@
-"""Warm, owner-bound SDK runtime; isolated prompt-only sessions per invocation."""
+"""Warm empty SDK runtime; explicitly authenticated isolated sessions per request."""
 import asyncio
 import json
 import logging
@@ -9,6 +9,8 @@ import time
 import uuid
 
 from config import Config
+from auth import current_credential
+from stream_filter import DeltaRedactor
 from inference_types import CompletionRequest, CompletionResult, ToolCall
 from schemas import FusionResult, validate_prompt
 from sdk_runtime import create_sdk_client, deny_permission, SDK_VERSION, RUNTIME_VERSION, PROTOCOL_VERSION
@@ -25,6 +27,18 @@ class ProviderError(Exception):
     pass
 
 
+class AuthenticationError(Exception):
+    pass
+
+
+class ProviderAccessDenied(Exception):
+    pass
+
+
+class CredentialExpired(Exception):
+    pass
+
+
 class UnexpectedTool(Exception):
     pass
 
@@ -35,7 +49,7 @@ class CopilotRunner:
         self._client_factory = client_factory or create_sdk_client
         self.client = None
         self.capable = False
-        self.capability_status = "disabled" if config.auth_mode == "disabled" else "not_checked"
+        self.capability_status = "not_checked"
         self.cli_version = None  # Deprecated compatibility name for runtime version.
         self.sdk_version = SDK_VERSION
         self._semaphore = asyncio.Semaphore(config.max_concurrency)
@@ -46,8 +60,12 @@ class CopilotRunner:
         self._idle = asyncio.Event()
         self._idle.set()
 
+    def secrets(self):
+        return (self.config.service_token, self.config.identity_key,
+                *(credential.token for credential in self.config.credentials.values()))
+
     def redact(self, value: str) -> str:
-        for secret in (self.config.github_token, self.config.mcp_token):
+        for secret in self.secrets():
             if secret:
                 value = value.replace(secret, "[REDACTED]")
         return re.sub(r"(?:github_pat_|gh[pousr]_)[A-Za-z0-9_]+", "[REDACTED]", value)
@@ -73,7 +91,7 @@ class CopilotRunner:
 
     async def probe(self):
         async with self._lifecycle_lock:
-            if self.client is not None or self.config.auth_mode != "single_user":
+            if self.client is not None:
                 return
             self.capable = False
             try:
@@ -100,10 +118,10 @@ class CopilotRunner:
                 self.capability_status = "runtime_check_failed"
                 await self._retire()
 
-    def session_options(self, tier, request_id, base):
+    def session_options(self, tier, request_id, base, credential):
         return dict(session_id=request_id, model="fusion", working_directory=str(base / "work"),
             enable_config_discovery=False,
-            github={"token": self.config.github_token, "capi": {"fusion_tier": tier},
+            github={"token": credential.token, "capi": {"fusion_tier": tier},
                     "telemetry_enabled": False, "interactive_user": False},
             permissions={"on_request": deny_permission},
             tools={"available_tools": [], "definitions": [], "manage_schedule_enabled": False},
@@ -136,7 +154,7 @@ class CopilotRunner:
             self.capability_status = "runtime_unavailable"
         return self.capable
 
-    async def _response(self, session, prompt, tool_map=None):
+    async def _response(self, session, prompt, tool_map=None, on_delta=None):
         tool_map = tool_map or {}
         loop = asyncio.get_running_loop()
         completed = loop.create_future()
@@ -145,9 +163,16 @@ class CopilotRunner:
         tool_calls = []
         usage = {}
         finish_reason = "stop"
+        redactor = DeltaRedactor(self.secrets())
+        message_deltas = []
+
+        def stream(text, final=False):
+            safe = redactor.feed(text, final=final)
+            if safe and on_delta is not None:
+                on_delta(safe)
 
         def answer():
-            return {"output": messages[-1] if messages else "".join(chunks),
+            return {"output": "".join(messages) if messages else "".join(chunks),
                     "tool_calls": tool_calls, "usage": usage or None,
                     "finish_reason": "tool_calls" if tool_calls else finish_reason}
 
@@ -174,7 +199,13 @@ class CopilotRunner:
                 if getattr(event.data, "finish_reason", None) in ("length", "max_tokens"):
                     finish_reason = "length"
             elif kind == "session.error":
-                completed.set_exception(ProviderError())
+                # Structured auth codes are safe to classify; never relay upstream text.
+                codes = {getattr(event.data, key, None) for key in
+                         ("error_type", "error_code", "provider_error_type", "provider_error_code", "status_code")}
+                error = (CredentialExpired() if "token_expired" in codes else
+                         AuthenticationError() if codes & {"authentication_error", "unauthorized", "invalid_token", "401", 401} else
+                         ProviderAccessDenied() if codes & {"access_denied", "forbidden", "403", 403} else ProviderError())
+                completed.set_exception(error)
             elif kind == "assistant.message_delta":
                 text = getattr(event.data, "delta_content", "") or ""
                 delta_bytes += len(text.encode("utf-8"))
@@ -182,12 +213,29 @@ class CopilotRunner:
                     completed.set_exception(OutputLimit())
                 else:
                     chunks.append(text)
+                    message_deltas.append(text)
+                    try:
+                        stream(text)
+                    except Exception:
+                        completed.set_exception(OutputLimit())
             elif kind == "assistant.message":
                 text = getattr(event.data, "content", "") or ""
                 final_bytes += len(text.encode("utf-8"))
                 if final_bytes > self.config.max_output_bytes:
                     completed.set_exception(OutputLimit())
                 else:
+                    # Some providers emit only complete messages. Reconcile each final
+                    # message with its deltas before forwarding any missing suffix.
+                    previous = "".join(message_deltas)
+                    if not text.startswith(previous):
+                        completed.set_exception(ProviderError())
+                        return
+                    try:
+                        stream(text[len(previous):])
+                    except Exception:
+                        completed.set_exception(OutputLimit())
+                        return
+                    message_deltas.clear()
                     messages.append(text)
                     requests = getattr(event.data, "tool_requests", None) or []
                     for request in requests:
@@ -225,7 +273,9 @@ class CopilotRunner:
         unsubscribe = session.on(observe)
         try:
             await session.send(prompt)
-            return await completed
+            result = await completed
+            stream("", final=True)
+            return result
         finally:
             unsubscribe()
             # Retrieve any event failure that raced a failed/cancelled send.
@@ -283,13 +333,13 @@ class CopilotRunner:
             async with self._lifecycle_lock:
                 await self._retire()
 
-    async def run(self, tier: str, prompt: str) -> FusionResult:
-        return await self._run(tier, prompt)
+    async def run(self, tier: str, prompt: str, *, credential=None) -> FusionResult:
+        return await self._run(tier, prompt, credential=credential)
 
-    async def complete(self, request: CompletionRequest) -> CompletionResult:
-        return await self._run(request.tier, request.prompt, request)
+    async def complete(self, request: CompletionRequest, *, credential=None, on_delta=None) -> CompletionResult:
+        return await self._run(request.tier, request.prompt, request, credential=credential, on_delta=on_delta)
 
-    async def _run(self, tier, prompt, completion=None):
+    async def _run(self, tier, prompt, completion=None, *, credential=None, on_delta=None):
         started = time.monotonic()
         result_type = CompletionResult if completion is not None else FusionResult
         result = result_type(ok=False, request_id=str(uuid.uuid4()), tier=tier, status="internal_error")
@@ -297,11 +347,12 @@ class CopilotRunner:
         session = workspace = None
         session_attempted = False
         try:
-            if self.config.auth_mode != "single_user":
-                result.status = "disabled"
+            credential = credential or current_credential.get()
+            if credential is None or self.config.credentials.get(credential.subject) != credential:
+                result.status = "unauthorized"
                 return result
-            if completion is not None and not self.config.enable_fallback:
-                result.status = "fallback_disabled"
+            if credential.expires_at <= time.time():
+                result.status = "credential_expired"
                 return result
             if tier not in self.config.allowed_tiers:
                 result.status = "access_denied"
@@ -350,8 +401,9 @@ class CopilotRunner:
                 if not await self.check_health():
                     result.status = self.capability_status
                     return result
-                session_attempted = True
-                options = self.session_options(tier, result.request_id, Path(workspace.name))
+                if credential.expires_at <= time.time():
+                    raise CredentialExpired()
+                options = self.session_options(tier, result.request_id, Path(workspace.name), credential)
                 tool_map = {}
                 if completion is not None:
                     # Internal names prevent caller names colliding with builtins.
@@ -362,9 +414,10 @@ class CopilotRunner:
                         parameters=tool.parameters, handler=None) for name, tool in tool_map.items()]
                     options["tools"]["available_tools"] = ["custom:" + name for name in tool_map]
                     options["system_message"] = {"mode": "replace", "content": completion.system_message}
+                session_attempted = True
                 session = await self.client.create_session(**options)
-                answer = await self._response(session, prompt, tool_map)
-            result.output = self.redact(answer["output"].strip())
+                answer = await self._response(session, prompt, tool_map, on_delta)
+            result.output = self.redact(answer["output"])
             if completion is not None:
                 result.tool_calls = answer["tool_calls"]
                 result.usage = answer["usage"]
@@ -376,6 +429,12 @@ class CopilotRunner:
             result.status = "output_limit"
         except UnexpectedTool:
             result.status = "tool_denied"
+        except AuthenticationError:
+            result.status = "authentication_error"
+        except ProviderAccessDenied:
+            result.status = "access_denied"
+        except CredentialExpired:
+            result.status = "credential_expired"
         except ProviderError:
             result.status = "provider_error"
         except asyncio.CancelledError:
@@ -387,7 +446,7 @@ class CopilotRunner:
             # A separate task owns *all* cleanup. Repeated HTTP cancellation
             # cannot interrupt workspace removal, semaphore release or audit.
             cleanup = asyncio.create_task(self._finish_request(result, started, session,
-                workspace, session_attempted, active, acquired))
+                workspace, session_attempted, active, acquired, getattr(credential, "subject", None)))
             cancelled = False
             while not cleanup.done():
                 try:
@@ -400,7 +459,7 @@ class CopilotRunner:
         return result
 
     async def _finish_request(self, result, started, session, workspace,
-                              session_attempted, active, acquired):
+                              session_attempted, active, acquired, subject):
         try:
             clean = True
             if session_attempted:
@@ -433,6 +492,6 @@ class CopilotRunner:
                     self._semaphore.release()
                 result.duration_ms = round((time.monotonic() - started) * 1000)
                 LOG.info(self.redact(json.dumps({"request_id": result.request_id,
-                    "subject": self.config.subject, "tool": "fusion_" + result.tier,
+                    "subject": subject, "tool": "fusion_" + result.tier,
                     "tier": result.tier, "duration_ms": result.duration_ms,
                     "status": result.status, "exit_code": result.exit_code})))

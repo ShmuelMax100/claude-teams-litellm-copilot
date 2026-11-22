@@ -1,9 +1,10 @@
-"""Opt-in model fallback: a fresh Fusion task carrying explicit conversation data.
+"""Fusion model adapter with per-request context and real incremental SSE.
 
-This is a context handoff, not an import of an Anthropic/Copilot transcript.
-All tool execution remains with the caller. Responses are buffered before SSE.
+History is explicit conversation data, not a native transcript import.
+All tool execution remains with the caller.
 """
 from dataclasses import dataclass
+from collections import deque
 import asyncio
 import json
 import math
@@ -16,6 +17,7 @@ from starlette.routing import Route
 
 from inference_types import CompletionRequest, ToolDefinition
 from schema_validation import SchemaBusy, SchemaValidator
+from stream_filter import OutputFilter
 
 
 MODELS = {"fusion-" + tier: tier for tier in ("standard", "high", "max")}
@@ -40,7 +42,7 @@ class InvalidRequest(ValueError):
     pass
 
 
-def fail(message="Unsupported or invalid fallback request."):
+def fail(message="Unsupported or invalid Fusion request."):
     raise InvalidRequest(message)
 
 
@@ -98,10 +100,10 @@ def _text(content, optional=False):
             if (not isinstance(block, dict) or block.get("type") != "text"
                     or set(block) - {"type", "text", "cache_control"}
                     or not isinstance(block.get("text"), str)):
-                fail("Fallback supports text content only; attachments are not forwarded.")
+                fail("Fusion supports text content only; attachments are not forwarded.")
             parts.append(block["text"])
         return "\n".join(parts)
-    fail("Fallback supports text content only.")
+    fail("Fusion supports text content only.")
 
 
 def _schema_refs(value):
@@ -142,7 +144,7 @@ def _tools(body):
         declarations.append(ToolDefinition(name=name, description=description, parameters=schema))
     choice = body.get("tool_choice", "auto")
     if choice not in (None, "auto", "none"):
-        fail("Fusion fallback supports automatic tool choice or no tools, not forced tools.")
+        fail("Fusion supports automatic tool choice or no tools, not forced tools.")
     if choice == "none":
         return (), {}
     return tuple(declarations), schemas
@@ -370,12 +372,164 @@ async def _complete_connected(request, runner, completion):
         await asyncio.gather(task, watcher, return_exceptions=True)
 
 
+def failure_response(result):
+    status = {"timeout": 504, "busy": 429, "invalid_input": 400,
+              "access_denied": 403, "unauthorized": 401, "credential_expired": 401, "authentication_error": 401,
+              "output_limit": 502}.get(result.status, 503)
+    return JSONResponse({"error": {"type": "authentication_error" if status == 401 else "fusion_error",
+        "message": "Fusion task did not complete.", "code": result.status}}, status_code=status,
+        headers={"Cache-Control": "no-store"})
+
+
+async def checked_completion(parsed, result, validator):
+    if not result.ok:
+        return failure_response(result)
+    try:
+        response = format_completion(parsed, result)
+        calls = [{"name": call["function"]["name"],
+                  "arguments": loads(call["function"]["arguments"])}
+                 for call in response["choices"][0]["message"].get("tool_calls", [])]
+        if calls and not await validator.validate(parsed.schemas, calls):
+            raise ValueError("Invalid or overly expensive tool arguments.")
+        return response
+    except SchemaBusy:
+        return JSONResponse({"error": {"type": "busy", "message": "Schema validation is busy."}}, status_code=429)
+    except (ValueError, TypeError, UnicodeError):
+        return JSONResponse({"error": {"type": "fusion_error", "message": "Fusion returned an invalid or oversized completion."}}, status_code=502)
+
+
+class ManagedStreamingResponse(StreamingResponse):
+    """Own task cleanup even when sending the HTTP headers fails before iteration."""
+    def __init__(self, *args, cleanup, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.cleanup = cleanup
+
+    async def __call__(self, scope, receive, send):
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            await self.cleanup()
+
+
+async def streaming_response(request, runner, parsed, config, validator, headers):
+    # A slow HTTP consumer cannot grow memory without bound. A full channel
+    # aborts the SDK task, and the existing session cleanup always runs.
+    queue, available = deque(), asyncio.Event()
+    output_filter = OutputFilter(parsed.max_tokens or config.max_output_bytes, parsed.stops)
+
+    def delta(text):
+        safe = output_filter.feed(text)
+        if safe:
+            if len(queue) >= 32:
+                raise BufferError("Streaming consumer is too slow")
+            queue.append(safe)
+            available.set()
+
+    task = asyncio.create_task(runner.complete(parsed.completion, on_delta=delta))
+
+    async def next_item():
+        while True:
+            if queue:
+                return "text", queue.popleft()
+            if task.done():
+                return "result", await task
+            available.clear()
+            waiter = asyncio.create_task(available.wait())
+            try:
+                await asyncio.wait((waiter, task), return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                waiter.cancel()
+                await asyncio.gather(waiter, return_exceptions=True)
+
+    async def stop():
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    async def disconnected():
+        while not await request.is_disconnected():
+            await asyncio.sleep(.05)
+
+    first = asyncio.create_task(next_item())
+    watcher = asyncio.create_task(disconnected())
+    try:
+        done, _ = await asyncio.wait((first, watcher), return_when=asyncio.FIRST_COMPLETED)
+        if watcher in done and first not in done:
+            await stop()
+            return JSONResponse({"error": {"type": "cancelled", "message": "Caller disconnected."}}, status_code=499)
+        initial = await first
+    except BaseException:
+        await stop()
+        raise
+    finally:
+        first.cancel()
+        watcher.cancel()
+        await asyncio.gather(first, watcher, return_exceptions=True)
+
+    # Before any output, preserve a normal HTTP failure status for clients.
+    if initial[0] == "result":
+        response = await checked_completion(parsed, initial[1], validator)
+        if isinstance(response, JSONResponse):
+            return response
+        return StreamingResponse(chunks(response, parsed.include_usage), media_type="text/event-stream", headers=headers)
+
+    base = {"id": "chatcmpl-" + uuid.uuid4().hex, "object": "chat.completion.chunk",
+            "created": int(time.time()), "model": parsed.model}
+
+    def frame(value):
+        return "data: " + json.dumps(value, ensure_ascii=False) + "\n\n"
+
+    def text_frame(text, first=False):
+        content = {"content": text}
+        if first:
+            content["role"] = "assistant"
+        return frame(dict(base, choices=[{"index": 0, "delta": content, "finish_reason": None}]))
+
+    async def generate():
+        emitted = ""
+        item = initial
+        try:
+            while item[0] == "text":
+                text = item[1]
+                yield text_frame(text, first=not emitted)
+                emitted += text
+                item = await next_item()
+            result = item[1]  # The runner returns only after session cleanup.
+            response = await checked_completion(parsed, result, validator)
+            if isinstance(response, JSONResponse):
+                yield "event: error\n" + "data: " + response.body.decode() + "\n\n"
+                return
+            message = response["choices"][0]["message"]
+            content = message["content"] or ""
+            if not content.startswith(emitted):
+                yield "event: error\n" + frame({"error": {"type": "fusion_error", "code": "inconsistent_stream",
+                    "message": "Fusion returned inconsistent streamed content."}})
+                return
+            if content[len(emitted):]:
+                yield text_frame(content[len(emitted):])
+            if message.get("tool_calls"):
+                calls = [dict(call, index=index) for index, call in enumerate(message["tool_calls"])]
+                yield frame(dict(base, choices=[{"index": 0, "delta": {"tool_calls": calls}, "finish_reason": None}]))
+            yield frame(dict(base, choices=[{"index": 0, "delta": {},
+                "finish_reason": response["choices"][0]["finish_reason"]}]))
+            if parsed.include_usage and response["usage"] is not None:
+                yield frame(dict(base, choices=[], usage=response["usage"]))
+            yield "data: [DONE]\n\n"
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            yield "event: error\n" + frame({"error": {"type": "fusion_error", "code": "stream_error",
+                "message": "Fusion stream did not complete."}})
+        finally:
+            await stop()
+
+    return ManagedStreamingResponse(generate(), cleanup=stop, media_type="text/event-stream", headers=headers)
+
+
 def create_inference_routes(config, runner):
     validator = SchemaValidator()
 
     async def complete(request):
-        if not config.enable_fallback:
-            return JSONResponse({"error": {"type": "not_enabled", "message": "Fusion inference fallback is disabled."}}, status_code=404)
         try:
             data = bytearray()
             async for chunk in request.stream():
@@ -389,29 +543,14 @@ def create_inference_routes(config, runner):
             return JSONResponse({"error": {"type": "busy", "message": "Schema validation is busy."}}, status_code=429)
         except InvalidRequest as error:
             return JSONResponse({"error": {"type": "invalid_request_error", "message": str(error)}}, status_code=400)
+        headers = {"X-Fusion-Context-Handoff": "true", "X-Fusion-Output-Limit": "conservative-returned-bytes",
+                   "Cache-Control": "no-store", "X-Accel-Buffering": "no"}
+        if parsed.stream:
+            return await streaming_response(request, runner, parsed, config, validator, headers)
         result = await _complete_connected(request, runner, parsed.completion)
         if result is None:
             return JSONResponse({"error": {"type": "cancelled", "message": "Caller disconnected."}}, status_code=499)
-        if not result.ok:
-            status = {"timeout": 504, "busy": 429, "invalid_input": 400,
-                      "access_denied": 403, "output_limit": 502}.get(result.status, 503)
-            return JSONResponse({"error": {"type": "fusion_error", "message": "Fusion task did not complete.",
-                                           "code": result.status}}, status_code=status)
-        try:
-            response = format_completion(parsed, result)
-            calls = [{"name": call["function"]["name"],
-                      "arguments": loads(call["function"]["arguments"])}
-                     for call in response["choices"][0]["message"].get("tool_calls", [])]
-            if calls and not await validator.validate(parsed.schemas, calls):
-                raise ValueError("Invalid or overly expensive tool arguments.")
-        except SchemaBusy:
-            return JSONResponse({"error": {"type": "busy", "message": "Schema validation is busy."}}, status_code=429)
-        except (ValueError, TypeError, UnicodeError):
-            return JSONResponse({"error": {"type": "fusion_error", "message": "Fusion returned an invalid or oversized completion."}}, status_code=502)
-        headers = {"X-Fusion-Context-Handoff": "true", "X-Fusion-Output-Limit": "conservative-returned-bytes",
-                   "Cache-Control": "no-store"}
-        if parsed.stream:
-            return StreamingResponse(chunks(response, parsed.include_usage), media_type="text/event-stream", headers=headers)
-        return JSONResponse(response, headers=headers)
+        response = await checked_completion(parsed, result, validator)
+        return response if isinstance(response, JSONResponse) else JSONResponse(response, headers=headers)
 
     return [Route("/v1/chat/completions", complete, methods=["POST"])]

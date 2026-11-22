@@ -8,6 +8,7 @@ from starlette.applications import Starlette
 from starlette.testclient import TestClient
 
 from auth import BearerGate
+from conftest import identity_headers
 from inference import HANDOFF, InvalidRequest, _complete_connected, create_inference_routes, parse_request
 from inference_types import CompletionResult, ToolCall
 
@@ -29,7 +30,7 @@ class Runner:
         self.result = CompletionResult(ok=True, request_id="test", tier="standard", status="succeeded",
                                        output="An answer", usage={"input_tokens": 10, "output_tokens": 4})
 
-    async def complete(self, request):
+    async def complete(self, request, *, on_delta=None):
         self.requests.append(request)
         return self.result
 
@@ -41,7 +42,7 @@ def client(config, runner):
 
 
 def headers(config):
-    return {"Authorization": "Bearer " + config.mcp_token}
+    return identity_headers(config)
 
 
 def test_context_preserves_roles_results_and_original_system(config):
@@ -62,7 +63,7 @@ def test_context_preserves_roles_results_and_original_system(config):
 
 
 def test_successful_response_and_usage_are_from_sdk(config):
-    config = replace(config, enable_fallback=True)
+    config = config
     runner = Runner()
     with client(config, runner) as http:
         response = http.post("/v1/chat/completions", json=body(), headers=headers(config))
@@ -74,7 +75,7 @@ def test_successful_response_and_usage_are_from_sdk(config):
 
 
 def test_tool_request_then_client_result_enters_new_task(config):
-    config = replace(config, enable_fallback=True)
+    config = config
     runner = Runner()
     runner.result = CompletionResult(ok=True, request_id="test", tier="standard", status="succeeded",
         tool_calls=[ToolCall(id="call_new", name="read_file", arguments={"path": "src/app.py"})])
@@ -94,7 +95,7 @@ def test_tool_request_then_client_result_enters_new_task(config):
 
 
 def test_streaming_tool_chunks_and_unknown_usage(config):
-    config = replace(config, enable_fallback=True)
+    config = config
     runner = Runner()
     runner.result = CompletionResult(ok=True, request_id="test", tier="standard", status="succeeded",
         tool_calls=[ToolCall(id="call_new", name="read_file", arguments={"path": "src/app.py"})], usage=None)
@@ -111,7 +112,7 @@ def test_streaming_tool_chunks_and_unknown_usage(config):
 
 
 def test_provider_failure_never_starts_success_stream(config):
-    config = replace(config, enable_fallback=True)
+    config = config
     runner = Runner()
     runner.result = CompletionResult(ok=False, request_id="test", tier="standard", status="timeout")
     with client(config, runner) as http:
@@ -122,7 +123,7 @@ def test_provider_failure_never_starts_success_stream(config):
 
 
 def test_returned_size_cap_and_stop_do_not_claim_generation_budget(config):
-    config = replace(config, enable_fallback=True)
+    config = config
     runner = Runner()
     runner.result.output = "éééé"
     with client(config, runner) as http:
@@ -141,18 +142,18 @@ def test_returned_size_cap_and_stop_do_not_claim_generation_budget(config):
     {"tool_choice": "required"}, {"stop": 0}, {"messages": []}, {"reasoning_effort": "high"}])
 def test_unsupported_controls_fail_before_sdk(config, change):
     runner = Runner()
-    config = replace(config, enable_fallback=True)
+    config = config
     with client(config, runner) as http:
         response = http.post("/v1/chat/completions", json=body(**change), headers=headers(config))
     assert response.status_code == 400
     assert runner.requests == []
 
 
-def test_fallback_is_opt_in_even_with_valid_service_bearer(config):
+def test_fusion_is_direct_with_valid_delegated_identity(config):
     runner = Runner()
     with client(config, runner) as http:
         response = http.post("/v1/chat/completions", json=body(), headers=headers(config))
-    assert response.status_code == 404 and runner.requests == []
+    assert response.status_code == 200 and len(runner.requests) == 1
 
 
 @pytest.mark.asyncio

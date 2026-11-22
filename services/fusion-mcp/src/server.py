@@ -41,7 +41,7 @@ def create_app(config: Config | None = None, runner: CopilotRunner | None = None
     mcp = MCPServer("GitHub Copilot Fusion", version="0.1.0", log_level="CRITICAL",
                     middleware=[strict_tools])
 
-    @mcp.tool(description="Everyday coding advice balancing cost, quality and latency. Single-user Fusion Standard; prompt text only, no file access.")
+    @mcp.tool(description="Everyday coding advice balancing cost, quality and latency. Per-user Fusion Standard; prompt text only, no file access.")
     async def fusion_standard(prompt: str) -> FusionResult:
         return await runner.run("standard", prompt)
 
@@ -69,7 +69,7 @@ def create_app(config: Config | None = None, runner: CopilotRunner | None = None
     async def live(request):
         # A failed local runtime cannot recover in this process. Signal ACA's
         # liveness restart instead of leaving the sole replica unready forever.
-        # Ordinary provider errors and disabled configuration are not fatal.
+        # Ordinary provider errors and expired user credentials are not fatal.
         fatal = runner.capability_status in ("runtime_unavailable", "cleanup_failed")
         return JSONResponse({"status": "restart_required" if fatal else "alive"},
                             status_code=503 if fatal else 200)
@@ -77,7 +77,7 @@ def create_app(config: Config | None = None, runner: CopilotRunner | None = None
     async def ready(request):
         await runner.check_health()
         return JSONResponse({"status": runner.capability_status,
-            "mode": config.auth_mode, "sdk_capable": runner.capable,
+            "mode": "per_user", "sdk_capable": runner.capable,
             "sdk_version": runner.sdk_version, "runtime_version": runner.cli_version,
             "cli_capable": runner.capable},
             status_code=200 if runner.capable else 503)

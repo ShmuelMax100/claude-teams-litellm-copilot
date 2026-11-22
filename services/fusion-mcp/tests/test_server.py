@@ -2,10 +2,11 @@ from dataclasses import replace
 from starlette.testclient import TestClient
 
 from server import create_app
+from conftest import identity_headers
 
 
 def rpc(client, config, method, params=None, ident=1):
-    return client.post("/mcp", headers={"Authorization": "Bearer " + config.mcp_token,
+    return client.post("/mcp", headers={**identity_headers(config),
         "Accept": "application/json, text/event-stream"}, json={"jsonrpc": "2.0", "id": ident,
         "method": method, "params": params or {}})
 
@@ -31,11 +32,11 @@ def test_native_handshake_discovery_invocation(config):
 def test_unauthorized_and_origin_denied(config):
     with TestClient(create_app(config)) as client:
         for headers in ({}, {"Authorization": "Bearer wrong"},
-                        {"x-user-id": config.subject}, {"Authorization": "Bearer " + config.github_token}):
+                        {"x-user-id": "owner-user-id"}, {"Authorization": "Bearer " + config.credentials["owner-user-id"].token}):
             assert client.post("/mcp", headers=headers).status_code == 401
-        assert client.post("/mcp", headers={"Authorization": "Bearer " + config.mcp_token,
+        assert client.post("/mcp", headers={"Authorization": "Bearer " + config.service_token,
             "Origin": "https://untrusted.example"}).status_code == 403
-        assert client.post("/mcp", headers=[("Authorization", "Bearer " + config.mcp_token),
+        assert client.post("/mcp", headers=[("Authorization", "Bearer " + config.service_token),
             ("Authorization", "Bearer wrong")]).status_code == 401
 
 
@@ -66,11 +67,7 @@ def test_invalid_arguments_and_tier_policy(config):
             assert "error" in response or response.get("result", {}).get("isError"), response
 
 
-def test_disabled_service_and_request_size(config):
-    with TestClient(create_app(replace(config, auth_mode="disabled"))) as client:
-        assert client.get("/health/live").status_code == 200
-        assert client.get("/health/ready").status_code == 503
-        assert rpc(client, config, "tools/list").status_code == 401
+def test_request_size(config):
     config = replace(config, max_input_chars=10)
     with TestClient(create_app(config)) as client:
         response = rpc(client, config, "tools/call", {"name": "fusion_standard", "arguments": {"prompt": "x" * 10000}})

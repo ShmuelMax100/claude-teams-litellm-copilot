@@ -25,17 +25,6 @@ variable "tags" {
   }
 }
 
-variable "enable_fusion_mcp" {
-  type    = bool
-  default = false
-}
-
-variable "enable_fusion_fallback" {
-  description = "Explicitly enable the single-owner guarded native Fusion fallback adapter. Requires enable_fusion_mcp; model/key fallback enrollment remains a separate administrator action."
-  type        = bool
-  default     = false
-}
-
 variable "enable_managed_postgresql" {
   type    = bool
   default = true
@@ -101,18 +90,6 @@ variable "litellm_log_level" {
   }
 }
 
-variable "copilot_only_models" {
-  description = "Optional explicit alias => entitled Copilot model ID map for existing copilot-only mode. Uses file-managed per-user OAuth routes without provider credentials. Empty by default."
-  type        = map(string)
-  default     = {}
-  validation {
-    condition = alltrue([for alias, model in var.copilot_only_models :
-      can(regex("^[A-Za-z0-9][A-Za-z0-9_.-]*$", alias)) && can(regex("^[A-Za-z0-9][A-Za-z0-9_.-]*$", model))
-    ])
-    error_message = "Provide literal aliases and model IDs, with letters, digits, dots, underscores or hyphens; no URLs, secrets or wildcards."
-  }
-}
-
 variable "gateway_allowed_cidrs" {
   description = "Optional developer ingress IP allowlist. An empty list relies on LiteLLM authentication."
   type        = list(string)
@@ -168,31 +145,31 @@ variable "external_database_key_vault_id" {
 variable "fusion_image" {
   description = "Operator-built Fusion image, pinned by digest. No image is built or published by Terraform."
   type        = string
-  default     = null
-}
-
-variable "fusion_single_user_subject" {
-  description = "Exact LiteLLM user ID of the one administrator-attested GitHub token owner. No multi-user execution."
-  type        = string
-  default     = null
 }
 
 variable "fusion_key_vault_id" {
-  description = "Azure resource ID of the vault containing both Fusion secrets."
+  description = "Azure resource ID of the existing vault holding the independent service bearer and each user PAT."
   type        = string
-  default     = null
 }
 
-variable "fusion_github_token_secret_id" {
-  description = "Existing Key Vault secret URI for the single owner's fine-grained PAT."
+variable "fusion_service_token_secret_id" {
+  description = "Existing Key Vault URI for the independent random gateway-to-Fusion bearer (at least 32 non-whitespace characters); never a GitHub PAT."
   type        = string
-  default     = null
 }
 
-variable "fusion_mcp_token_secret_id" {
-  description = "Existing Key Vault secret URI for an independent random service bearer (at least 32 characters, enforced by the service)."
-  type        = string
-  default     = null
+variable "fusion_users" {
+  description = "Exact authenticated LiteLLM user IDs mapped to separate user-owned PAT secret URIs and their actual Unix expiry. No credential values belong in Terraform inputs."
+  type = map(object({
+    github_token_secret_id = string
+    expires_at             = number
+  }))
+  validation {
+    condition = length(var.fusion_users) > 0 && alltrue([for subject, credential in var.fusion_users :
+      can(regex("^[A-Za-z0-9_.:@-]{1,128}$", subject)) &&
+      credential.expires_at > 0 && credential.expires_at <= 4102444800 && floor(credential.expires_at) == credential.expires_at
+    ])
+    error_message = "Configure at least one exact user ID (1–128 letters, digits, underscore, dot, colon, @ or hyphen) and a positive integral Unix credential expiry no later than 2100-01-01."
+  }
 }
 
 variable "fusion_cpu" {
@@ -206,13 +183,13 @@ variable "fusion_memory" {
 }
 
 variable "fusion_min_replicas" {
-  description = "Keep the SDK runtime warm when Fusion is explicitly enabled. One replica incurs ongoing idle/active charges; set 0 to permit cold starts and scale-to-zero. Fusion remains disabled by default."
+  description = "Keep the SDK runtime warm. One replica incurs ongoing idle/active charges; set 0 to permit cold starts and scale-to-zero."
   type        = number
   default     = 1
 }
 
 variable "fusion_max_replicas" {
-  description = "Per-replica SDK runtimes are independent. The single-user deployment defaults to one replica."
+  description = "Per-replica SDK runtimes are independent. Fresh request sessions do not require sticky routing."
   type        = number
   default     = 1
 }
@@ -227,18 +204,8 @@ variable "fusion_timeout_seconds" {
   }
 }
 
-variable "fusion_primary_timeout_seconds" {
-  description = "Anthropic primary attempt deadline when guarded fallback is enabled. Primary + Fusion execution + 20 seconds of fallback transport must fit within 230 seconds, leaving ACA ingress overhead."
-  type        = number
-  default     = 60
-  validation {
-    condition     = var.fusion_primary_timeout_seconds >= 1 && var.fusion_primary_timeout_seconds <= 180 && floor(var.fusion_primary_timeout_seconds) == var.fusion_primary_timeout_seconds
-    error_message = "Fusion fallback primary timeout must be an integer from 1 through 180 seconds."
-  }
-}
-
 variable "fusion_max_concurrency" {
-  description = "Maximum concurrent isolated SDK sessions per replica, also used as the HTTP autoscaling target. This does not authorize additional users."
+  description = "Maximum concurrent isolated SDK sessions per replica, also used as the HTTP autoscaling target."
   type        = number
   default     = 2
   validation {

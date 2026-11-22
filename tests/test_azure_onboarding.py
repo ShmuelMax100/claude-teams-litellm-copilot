@@ -18,14 +18,18 @@ class AzureWorkflowTests(unittest.TestCase):
         self.root = Path(self.temp.name)
     def tearDown(self):
         self.temp.cleanup()
-    def test_configuration_disables_fusion_and_never_deploys(self):
+    def test_configuration_requires_fusion_and_never_deploys(self):
         destination = self.root / 'vars.json'
         with patch.object(azure, '_run') as run:
-            result = azure.configure('00000000-0000-4000-8000-000000000001', 'team-dev', destination=destination)
+            result = azure.configure('00000000-0000-4000-8000-000000000001', 'team-dev', destination=destination,
+                fusion_image='example.azurecr.io/fusion:v1', fusion_key_vault_id='/subscriptions/example/vaults/test',
+                fusion_service_token_secret_id='https://test.vault.azure.net/secrets/service',
+                fusion_users={'alice': {'github_token_secret_id': 'https://test.vault.azure.net/secrets/alice', 'expires_at': 2000000000}})
         run.assert_not_called()
         self.assertFalse(result['deployed'])
         value = read(destination)
-        self.assertFalse(value['enable_fusion_mcp'])
+        self.assertNotIn('enable_fusion_mcp', value)
+        self.assertEqual(set(value['fusion_users']), {'alice'})
         self.assertTrue(value['enable_managed_postgresql'])
         self.assertEqual(destination.stat().st_mode & 0o777, 0o600)
         with self.assertRaises(Error):
@@ -91,7 +95,7 @@ class AzureWorkflowTests(unittest.TestCase):
                 self.calls.append(path)
                 if path == '/health/readiness/details':
                     return {'status': 'healthy', 'db': 'connected', 'litellm_version': '1.108.0'}
-                return {'data': [{'id': 'anthropic/*'}]}
+                return {'data': [{'id': 'fusion-standard'}]}
         api = API()
         with patch.object(azure, 'API', return_value=api):
             result = azure.validate(api.url, 'sk-fixture')
@@ -102,16 +106,11 @@ class AzureWorkflowTests(unittest.TestCase):
         with patch.object(azure, '_run', return_value=json.dumps([account])) as run:
             self.assertEqual(azure.choose_subscription(lambda _: '1'), account['id'])
         self.assertEqual(run.call_args.args[0], ['az', 'account', 'list', '--output', 'json'])
-    def test_cli_default_admin_flow_still_dispatches_original_wizard(self):
-        with patch.object(sys, 'argv', ['./setup', 'admin']), patch.object(cli, 'Wizard') as wizard:
-            cli.main()
-        wizard.return_value.run.assert_called_once_with('admin')
-    def test_optional_dispatch_does_not_run_legacy_doctor(self):
-        import fusion
-        with patch.object(sys, 'argv', ['./setup', 'doctor', '--fusion']), patch.object(fusion, 'main') as main, patch.object(cli, 'Wizard') as wizard:
-            cli.main()
-        main.assert_called_once_with(['doctor'])
-        wizard.assert_not_called()
+    def test_configuration_without_required_fusion_never_writes(self):
+        destination = self.root / 'vars.json'
+        with self.assertRaises(Error):
+            azure.configure('00000000-0000-4000-8000-000000000001', 'team-dev', destination=destination)
+        self.assertFalse(destination.exists())
 
 
 if __name__ == '__main__':
