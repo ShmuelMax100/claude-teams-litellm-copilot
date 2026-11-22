@@ -1,0 +1,45 @@
+# Synthetic integration only: no cloud resources, real credentials or provider egress.
+services:
+  db:
+    image: postgres:16-alpine@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
+    env_file: ${FUSION_QA_DIR:?test runner required}/db.env
+    tmpfs: /var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U fixture -d fixture']
+      interval: 2s
+      timeout: 2s
+      retries: 30
+  gateway:
+    image: ghcr.io/berriai/litellm:v1.108.0@sha256:c560d317136880ea92d62334d4367ab10955b1af189dd3ea24f6551290b1d6c1
+    env_file: ${FUSION_QA_DIR:?test runner required}/gateway.env
+    command: [--config, /qa/config.json, --port, '4000']
+    volumes:
+      - ${FUSION_QA_DIR:?test runner required}/config.json:/qa/config.json:ro
+      - ../../services/litellm-fusion-gateway/fusion_gateway_guard.py:/qa/fusion_gateway_guard.py:ro
+    depends_on:
+      db:
+        condition: service_healthy
+  fusion:
+    image: ${FUSION_QA_IMAGE:-fusion-mcp:local}
+    network_mode: service:gateway
+    env_file: ${FUSION_QA_DIR:?test runner required}/fusion.env
+    command: [python, /qa/sdk_entrypoint.py]
+    volumes:
+      - ./sdk_entrypoint.py:/qa/sdk_entrypoint.py:ro
+      - ./fake_sdk.py:/qa/fake_sdk.py:ro
+      - ./cancel_probe.py:/qa/cancel_probe.py:ro
+    read_only: true
+    tmpfs: /tmp
+    depends_on: [gateway]
+  ingress:
+    image: python:3.11-slim@sha256:ef442c44cde6d7aec39ae63dad1ced44fa7290790d68c028686cdd2e31a76a95
+    command: [python, /ingress.py]
+    volumes: [./ingress.py:/ingress.py:ro]
+    read_only: true
+    ports: ['127.0.0.1::4000', '127.0.0.1::8080']
+    networks: [default, ingress]
+    depends_on: [gateway, fusion]
+networks:
+  default:
+    internal: true
+  ingress: {}

@@ -1,211 +1,136 @@
 #!/usr/bin/env python3
-"""Join once; afterwards launch Claude Code normally. Python 3 standard library only."""
-import argparse, datetime, hashlib, json, os, shutil, subprocess, sys, time, webbrowser
+"""Connect Claude Code to the Fusion gateway without executing a model request."""
+import argparse
+import datetime
+import hashlib
+import json
+import os
+import shutil
 from pathlib import Path
-from gateway import API, Error, connected, key_info, origin, private_write, read
 
-CONFLICTS=['ANTHROPIC_API_KEY','ANTHROPIC_AUTH_TOKEN','ANTHROPIC_MODEL','ANTHROPIC_DEFAULT_MODEL',
-           'CLAUDE_CODE_USE_BEDROCK','CLAUDE_CODE_USE_VERTEX','CLAUDE_CODE_USE_FOUNDRY']
+from gateway import Error, private_write, read
+from fusion_gateway import validate_invitation, validate_key
 
-def validate_invitation_shape(invite):
-    if not isinstance(invite,dict):raise Error('The invitation must be a JSON object. Use the private .invite.json file supplied by your administrator.')
-    if invite.get('format') not in (1,2):raise Error('Unsupported invitation format.')
-    mode=invite.get('mode','legacy')
-    if mode not in ('legacy','copilot-only') or (invite['format']==1 and mode!='legacy') or (invite['format']==2 and mode!='copilot-only'):
-        raise Error('Invitation format and integration mode are inconsistent.')
-    if mode=='copilot-only':
-        if invite.get('protocol') not in ('chat','messages') or invite.get('fallback_policy')!={'metadata':{'disable_fallbacks':True}}:
-            raise Error('Invalid copilot-only protocol or routing policy.')
-        if any('*' in str(m) or str(m).startswith('anthropic/') for m in invite.get('models',[])):
-            raise Error('Copilot-only invitations require explicit direct models.')
-    for field in ('gateway','key','user_id','github_login','credential'):
-        if not isinstance(invite.get(field),str) or not invite[field].strip():
-            raise Error('The invitation is missing a valid '+field+'. Ask your administrator for a new invitation.')
-    if not isinstance(invite.get('models'),list) or not invite['models'] or any(not isinstance(m,str) or not m for m in invite['models']):
-        raise Error('The invitation has no valid model list. Ask your administrator for a new invitation.')
-    origin(invite['gateway'])
-    if not invite['key'].startswith('sk-'):raise Error('Invalid personal key in invitation.')
+CONFLICTS = ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_MODEL', 'ANTHROPIC_DEFAULT_MODEL',
+             'ANTHROPIC_BASE_URL', 'ANTHROPIC_CUSTOM_HEADERS', 'ANTHROPIC_SMALL_FAST_MODEL',
+             'ANTHROPIC_DEFAULT_SONNET_MODEL', 'ANTHROPIC_DEFAULT_OPUS_MODEL', 'ANTHROPIC_DEFAULT_HAIKU_MODEL',
+             'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY',
+             'CLAUDE_CODE_EFFORT_LEVEL', 'CLAUDE_CODE_DISABLE_THINKING', 'CLAUDE_CODE_MAX_RETRIES', 'CLAUDE_CODE_RETRY_WATCHDOG',
+             'CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS', 'CLAUDE_CODE_DISABLE_STRUCTURED_OUTPUTS']
+MODEL_ENV = ('ANTHROPIC_MODEL', 'ANTHROPIC_DEFAULT_SONNET_MODEL', 'ANTHROPIC_DEFAULT_OPUS_MODEL',
+             'ANTHROPIC_DEFAULT_HAIKU_MODEL', 'ANTHROPIC_SMALL_FAST_MODEL')
+COMPATIBILITY_ENV = {'CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY': '1', 'CLAUDE_CODE_AUTO_MODE_SERVER': '0',
+    'CLAUDE_CODE_DISABLE_THINKING': '1', 'CLAUDE_CODE_EFFORT_LEVEL': 'auto', 'CLAUDE_CODE_MAX_RETRIES': '0',
+    'CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS': '1', 'CLAUDE_CODE_DISABLE_STRUCTURED_OUTPUTS': '1'}
+validate_invitation_shape = validate_invitation
+validate_invite = validate_key
 
-def validate_invite(invite):
-    validate_invitation_shape(invite)
-    if invite.get('mode')=='copilot-only':
-        import copilot
-        return copilot.validate(invite)
-    api=API(invite['gateway'],invite['key']);info=key_info(api)
-    if info['user_id']!=invite['user_id']:raise Error('Invitation and key owner do not match.')
-    u=api.call('/user/info').get('user_info',{})
-    if u.get('user_id')!=invite['user_id'] or u.get('user_role') not in ('internal_user','internal_user_viewer'):
-        raise Error('This invitation is not for a developer account.')
-    if (u.get('metadata') or {}).get('github_login')!=invite['github_login']:
-        raise Error('Invitation GitHub identity does not match the gateway user.')
-    if not set(invite['models'])<=set(info.get('models',[])):
-        raise Error('The personal key does not allow the invitation models.')
-    return api
 
-def connect(api,invite,no_browser=False):
-    credential=invite['credential'];connection=connected(api,credential)
-    fresh=False
-    if not connection:
-        flow=api.call('/credentials/'+credential+'/user_connection/start','POST')
-        if flow.get('verification_uri')!='https://github.com/login/device':raise Error('Unexpected GitHub authorization URL. This package supports github.com.')
-        interval=int(flow['interval']);expiry=int(flow['expires_in'])
-        if not 1<=interval<=60 or not 1<=expiry<=1800:raise Error('Invalid device-flow timing.')
-        print('Sign in as '+invite['github_login']+'. Open '+flow['verification_uri'],flush=True)
-        print('Enter this one-time code: '+flow['user_code'],flush=True)
-        if not no_browser:webbrowser.open(flow['verification_uri'])
-        deadline=time.monotonic()+expiry
-        while time.monotonic()+interval<deadline:
-            time.sleep(interval)
-            result=api.call('/credentials/'+credential+'/user_connection/poll','POST',{'flow_handle':flow['flow_handle']})
-            status=result.get('status')
-            if status=='connected':connection=result;fresh=True;break
-            if status not in ('pending','slow_down'):raise Error('GitHub sign-in did not complete: '+str(status)+'. Rerun join.')
-            interval=max(interval+(5 if status=='slow_down' else 0),int(result.get('interval') or interval))
-            if interval>60:raise Error('GitHub sign-in is rate limited. Rerun join later.')
-        if not connection:raise Error('GitHub authorization expired. Rerun join.')
-    if connection.get('github_login','').lower()!=invite['github_login'].lower():
-        if fresh and invite.get('mode')!='copilot-only':api.call('/credentials/'+credential+'/user_connection','DELETE')
-        raise Error('Wrong GitHub account connected. Contact the administrator; local settings were not changed.')
-    print('GitHub Copilot connection verified.',flush=True)
-
-def probe_copilot(api,model='claude-copilot-sonnet'):
-    response=api.call('/v1/messages','POST',{'model':model,'max_tokens':256,
-        'messages':[{'role':'user','content':'Reply with exactly ONBOARDING_COPILOT_OK'}]})
-    text=''.join(b.get('text','') for b in response.get('content',[]) if b.get('type')=='text')
-    if 'ONBOARDING_COPILOT_OK' not in text:raise Error('Copilot replied but did not pass the onboarding marker check.')
-    return {'success':True,'requested_model':model,'response_model':response.get('model'),'request_id':response.get('id')}
-
-def configure(invite,directory):
-    directory=Path(directory);settings=directory/'settings.json';state=directory/'gateway-onboarding.json'
-    if settings.is_symlink():raise Error('settings.json is a symlink. Ask IT to update its managed source.')
-    existed=settings.exists();before=read(settings) if existed else {}
-    updated=json.loads(json.dumps(before));updated.pop('apiKeyHelper',None)
-    env=updated.setdefault('env',{})
-    for k in CONFLICTS:env.pop(k,None)
-    headers=[line for line in env.get('ANTHROPIC_CUSTOM_HEADERS','').splitlines()
-             if line.strip() and line.split(':',1)[0].strip().lower()!='x-litellm-api-key']
-    headers.append('x-litellm-api-key: Bearer '+invite['key'])
-    env.update({'ANTHROPIC_BASE_URL':invite['gateway'],'ANTHROPIC_CUSTOM_HEADERS':'\n'.join(headers),
-        'ANTHROPIC_DEFAULT_SONNET_MODEL':'claude-sonnet-5-5',
-        'ANTHROPIC_DEFAULT_OPUS_MODEL':'claude-opus-5-5',
-        'ANTHROPIC_DEFAULT_HAIKU_MODEL':'claude-haiku-5-5',
-        'CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY':'1','CLAUDE_CODE_AUTO_MODE_SERVER':'0'})
-    updated['model']='sonnet'
-    if invite.get('mode')=='copilot-only':
-        env['ANTHROPIC_AUTH_TOKEN']=invite['key']
-        env['ANTHROPIC_CUSTOM_HEADERS']='\n'.join(line for line in headers if not line.lower().startswith('x-litellm-api-key:'))
-        for name in ('ANTHROPIC_MODEL','ANTHROPIC_DEFAULT_SONNET_MODEL','ANTHROPIC_DEFAULT_OPUS_MODEL','ANTHROPIC_DEFAULT_HAIKU_MODEL'):
-            env[name]=invite['models'][0]
-        updated['model']=invite['models'][0]
-    previous=read(state) if state.exists() else {}
-    if before==updated and previous.get('gateway')==invite['gateway']:
-        print('Claude Code settings already configured; no duplicate backup created.');return settings
-    stamp=datetime.datetime.now().strftime('%Y%m%d-%H%M%S-%f')
-    backup=directory/'backups'/('gateway-'+stamp)
-    backup.mkdir(parents=True,mode=0o700);backup.chmod(0o700)
-    private_write(backup/'settings.json',before)
-    private_write(settings,updated)
-    private_write(state,{'gateway':invite['gateway'],'user_id':invite['user_id'],
-        'github_login':invite['github_login'],'credential':invite['credential'],'models':invite['models'],
-        'backup':str(backup/'settings.json'),'previously_existed':existed,
-        'mode':invite.get('mode','legacy'),'installed_hash':hashlib.sha256(settings.read_bytes()).hexdigest()})
-    print('Claude Code configured. Private backup: '+str(backup/'settings.json'),flush=True)
+def configure(invite, directory):
+    validate_invitation(invite)
+    directory = Path(directory)
+    settings = directory / 'settings.json'
+    state = directory / 'gateway-onboarding.json'
+    if settings.is_symlink() or state.is_symlink():
+        raise Error('Claude settings or onboarding state is a symlink. Update the managed source instead.')
+    existed = settings.exists()
+    before = read(settings) if existed else {}
+    if not isinstance(before, dict) or not isinstance(before.get('env', {}), dict):
+        raise Error('Claude settings must be an object with an object env field.')
+    updated = json.loads(json.dumps(before))
+    updated.pop('apiKeyHelper', None)
+    env = updated.setdefault('env', {})
+    for name in CONFLICTS:
+        env.pop(name, None)
+    env.update({'ANTHROPIC_BASE_URL': invite['gateway'], 'ANTHROPIC_AUTH_TOKEN': invite['key'], **COMPATIBILITY_ENV})
+    for name in MODEL_ENV:
+        env[name] = invite['default_model']
+    updated['model'] = invite['default_model']
+    previous = read(state) if state.exists() else {}
+    if (before == updated and previous.get('format') == invite['format']
+            and previous.get('user_id') == invite['user_id'] and previous.get('gateway') == invite['gateway']):
+        return settings
+    stamp = datetime.datetime.now().strftime('%Y%m%d-%H%M%S-%f')
+    backup = directory / 'backups' / ('gateway-' + stamp)
+    backup.mkdir(parents=True, mode=0o700)
+    backup.chmod(0o700)
+    private_write(backup / 'settings.json', before)
+    private_write(settings, updated)
+    saved = {key: invite[key] for key in ('format', 'gateway', 'user_id', 'github_login', 'tier', 'models', 'default_model')}
+    saved.update(backup=str(backup / 'settings.json'), previously_existed=existed,
+                 installed_hash=hashlib.sha256(settings.read_bytes()).hexdigest())
+    private_write(state, saved)
     return settings
 
-def smoke(settings=None):
-    command=['claude','-p','Reply with exactly ONBOARDING_PRIMARY_ROUTE_OK',
-             '--model','sonnet','--effort','low','--tools','',
-             '--strict-mcp-config','--mcp-config','{"mcpServers":{}}',
-             '--max-turns','1','--output-format','json','--no-session-persistence']
-    if settings:command+=['--settings',str(settings)]
-    try:r=subprocess.run(command,capture_output=True,text=True,timeout=180)
-    except subprocess.TimeoutExpired:raise Error('Claude test timed out. Settings are installed; run doctor after checking gateway Logs.') from None
-    try:result=json.loads(r.stdout)
-    except ValueError:raise Error('Claude did not return a test result. Run claude auth login, then developer.py doctor.') from None
-    if r.returncode or result.get('is_error') or 'ONBOARDING_PRIMARY_ROUTE_OK' not in result.get('result',''):
-        raise Error('Claude test failed. Run claude auth login and check gateway Logs, then rerun doctor.')
-    return {'success':True,'requested_model':'sonnet','marker':'ONBOARDING_PRIMARY_ROUTE_OK',
-            'meaning':'Primary route answered; inspect gateway Logs to distinguish primary from fallback.'}
 
 def preflight():
-    if not shutil.which('claude'):raise Error('Install Claude Code first, then rerun this command.')
-    if os.environ.get('CLAUDE_CONFIG_DIR'):raise Error('A custom CLAUDE_CONFIG_DIR is active. Use the standard Claude profile for this installer.')
-    conflicts=[k for k in CONFLICTS if os.environ.get(k)]
-    if conflicts:raise Error('Clear these shell overrides and their shell-profile entries: '+', '.join(conflicts))
+    if not shutil.which('claude'):
+        raise Error('Install Claude Code first, then rerun this command.')
+    if os.environ.get('CLAUDE_CONFIG_DIR'):
+        raise Error('A custom CLAUDE_CONFIG_DIR is active. Use the standard Claude profile for this installer.')
+    conflicts = [name for name in CONFLICTS if os.environ.get(name)]
+    if conflicts:
+        raise Error('Clear conflicting shell overrides before installation: ' + ', '.join(conflicts))
 
-def join(invite,no_browser=False):
-    if invite.get('mode')=='copilot-only':
-        import copilot
-        return copilot.join(invite,no_browser)
+
+def join(invite, directory=None):
     preflight()
-    if os.environ.get('ANTHROPIC_BASE_URL') and os.environ['ANTHROPIC_BASE_URL'].rstrip('/')!=invite['gateway']:
-        raise Error('Unset the conflicting ANTHROPIC_BASE_URL shell override before joining.')
-    if os.environ.get('ANTHROPIC_CUSTOM_HEADERS'):
-        raise Error('Unset ANTHROPIC_CUSTOM_HEADERS in this shell before joining; the installer preserves headers already in settings.json.')
-    print('[1/4] Checking your personal invitation…',flush=True);api=validate_invite(invite)
-    print('[2/4] Connecting your GitHub account…',flush=True);connect(api,invite,no_browser)
-    print('[3/4] Testing Copilot before changing local settings…',flush=True);direct=probe_copilot(api)
-    configure(invite,Path.home()/'.claude')
-    print('[4/4] Testing Claude Code through your new gateway…',flush=True)
-    auth=subprocess.run(['claude','auth','status','--json'],capture_output=True,text=True)
-    try:status=json.loads(auth.stdout);logged=status.get('loggedIn')
-    except ValueError:status={};logged=False
-    if logged and status.get('authMethod')!='claude.ai':
-        raise Error('Claude is using API credentials, not the subscription. Check project/managed overrides and run claude auth login, then doctor.')
-    if not logged:
-        print('Complete Claude subscription sign-in in your browser.',flush=True)
-        if subprocess.run(['claude','auth','login']).returncode:raise Error('Claude login incomplete. Run claude auth login, then developer.py doctor.')
-        check=subprocess.run(['claude','auth','status','--json'],capture_output=True,text=True)
-        try:after=json.loads(check.stdout)
-        except ValueError:after={}
-        if not after.get('loggedIn') or after.get('authMethod')!='claude.ai':
-            raise Error('Choose a Claude subscription account during login, then rerun doctor.')
-    result={'copilot':direct,'claude_code':smoke()}
-    print('Ready. Restart any open Claude sessions, then run: claude')
-    return result
+    validate_key(invite)
+    settings = configure(invite, directory or Path.home() / '.claude')
+    return {'action': 'connected', 'settings': str(settings), 'model': invite['default_model'], 'model_requests': 0,
+            'next': 'Restart Claude Code. Fusion is used from the first request; no subscription sign-in is required.'}
 
-def doctor():
-    preflight();d=Path.home()/'.claude'
-    if not (d/'gateway-onboarding.json').exists():
-        raise Error('This machine has not joined yet. Run ./setup developer and choose Join with my invitation.')
-    state=read(d/'gateway-onboarding.json');settings=read(d/'settings.json')
-    env=settings.get('env',{})
-    if env.get('ANTHROPIC_BASE_URL')!=state['gateway']:raise Error('Gateway settings changed. Rerun join with your invitation.')
-    if os.environ.get('ANTHROPIC_BASE_URL') and os.environ['ANTHROPIC_BASE_URL'].rstrip('/')!=state['gateway']:
-        raise Error('A shell ANTHROPIC_BASE_URL overrides your installed gateway.')
-    if os.environ.get('ANTHROPIC_CUSTOM_HEADERS'):raise Error('Unset shell ANTHROPIC_CUSTOM_HEADERS before running doctor.')
-    auth=subprocess.run(['claude','auth','status','--json'],capture_output=True,text=True)
-    try:status=json.loads(auth.stdout)
-    except ValueError:status={}
-    if not status.get('loggedIn') or status.get('authMethod')!='claude.ai':raise Error('Sign in with your Claude subscription using claude auth login, then rerun doctor.')
-    headers=env.get('ANTHROPIC_CUSTOM_HEADERS','').splitlines()
-    line=next((x for x in headers if x.lower().startswith('x-litellm-api-key:')),None)
-    if not line:raise Error('Personal gateway key header is missing.')
-    key=line.split(':',1)[1].strip().removeprefix('Bearer ').strip()
-    api=validate_invite(dict(state,format=1,key=key))
-    conn=connected(api,state['credential'])
-    if not conn or conn.get('github_login','').lower()!=state['github_login'].lower():raise Error('GitHub connection is missing or mismatched. Rerun join.')
-    result={'copilot':probe_copilot(api),'claude_code':smoke()}
-    print('PASS: personal identity, GitHub connection, Copilot inference and Claude Code reply.')
-    return result
+
+def doctor(invite=None, directory=None):
+    if invite is not None:
+        validate_key(invite)
+        return {'action': 'verified-personal-key', 'user_id': invite['user_id'], 'model': invite['default_model'],
+                'model_requests': 0, 'note': 'Provider entitlement and live inference were not tested.'}
+    directory = Path(directory) if directory else Path.home() / '.claude'
+    if not (directory / 'gateway-onboarding.json').is_file():
+        raise Error('This machine has not joined Fusion. Run ./setup developer join --invite /path/to/invitation.json.')
+    preflight()
+    state = read(directory / 'gateway-onboarding.json')
+    settings = read(directory / 'settings.json')
+    env = settings.get('env', {})
+    if (env.get('ANTHROPIC_BASE_URL') != state.get('gateway') or settings.get('model') != state.get('default_model')
+            or any(env.get(name) != state.get('default_model') for name in MODEL_ENV)
+            or any(env.get(name) != expected for name, expected in COMPATIBILITY_ENV.items())
+            or 'apiKeyHelper' in settings or any(env.get(name) for name in (
+                'ANTHROPIC_API_KEY', 'ANTHROPIC_CUSTOM_HEADERS', 'CLAUDE_CODE_USE_BEDROCK',
+                'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY'))):
+        raise Error('Claude gateway configuration changed. Review it or reconnect with your Fusion invitation.')
+    return doctor(dict(state, key=env.get('ANTHROPIC_AUTH_TOKEN', '')))
+
 
 def undo(directory=None):
-    d=Path(directory) if directory else Path.home()/'.claude';state=read(d/'gateway-onboarding.json');settings=d/'settings.json'
-    if hashlib.sha256(settings.read_bytes()).hexdigest()!=state['installed_hash']:
-        raise Error('Settings changed since onboarding. Merge the private backup manually: '+state['backup'])
-    if state['previously_existed']:private_write(settings,read(state['backup']))
-    else:settings.unlink()
-    (d/'gateway-onboarding.json').unlink()
-    print('Previous Claude settings restored. This does not revoke the key or disconnect GitHub.')
+    directory = Path(directory) if directory else Path.home() / '.claude'
+    state = read(directory / 'gateway-onboarding.json')
+    settings = directory / 'settings.json'
+    if settings.is_symlink() or hashlib.sha256(settings.read_bytes()).hexdigest() != state['installed_hash']:
+        raise Error('Settings changed since onboarding. Merge the private backup manually: ' + state['backup'])
+    if state['previously_existed']:
+        private_write(settings, read(state['backup']))
+    else:
+        settings.unlink()
+    (directory / 'gateway-onboarding.json').unlink()
+    return {'action': 'restored', 'note': 'The personal gateway key remains valid until revoked or expired.'}
 
-def main():
-    p=argparse.ArgumentParser(description=__doc__);p.add_argument('command',choices=['join','doctor','undo'])
-    p.add_argument('--invite',type=Path);p.add_argument('--no-browser',action='store_true');p.add_argument('--report',type=Path)
-    a=p.parse_args()
-    if a.command=='join' and not a.invite:p.error('join requires --invite /path/to/private-invitation.json')
-    result=join(read(a.invite),a.no_browser) if a.command=='join' else doctor() if a.command=='doctor' else undo()
-    if a.report and result:private_write(a.report,result)
 
-if __name__=='__main__':
-    try:main()
-    except (Error,ValueError,KeyError,FileNotFoundError) as e:print('ERROR: '+str(e),file=sys.stderr);sys.exit(1)
+def main(argv=None):
+    parser = argparse.ArgumentParser(prog='./setup developer', description=__doc__)
+    commands = parser.add_subparsers(dest='command', required=True)
+    join_parser = commands.add_parser('join')
+    join_parser.add_argument('--invite', type=Path, required=True)
+    doctor_parser = commands.add_parser('doctor')
+    doctor_parser.add_argument('--invite', type=Path)
+    commands.add_parser('restore')
+    args = parser.parse_args(argv)
+    if args.command == 'join':
+        result = join(read(args.invite))
+    elif args.command == 'doctor':
+        result = doctor(read(args.invite) if args.invite else None)
+    else:
+        result = undo()
+    print(json.dumps(result, indent=2))
+    return result

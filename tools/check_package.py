@@ -9,6 +9,18 @@ from html.parser import HTMLParser
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+CACHE_DIRS = {'.git', '.terraform', '.venv', 'venv', '__pycache__', '.pytest_cache', 'node_modules', 'private', 'dist', '_site'}
+
+
+def source_files():
+    """Scan distributable source, including new files, without walking tool caches."""
+    import os
+    for directory, names, files in os.walk(ROOT):
+        names[:] = [name for name in names if name not in CACHE_DIRS and not (Path(directory) / name).is_symlink()]
+        for name in files:
+            path = Path(directory) / name
+            if not path.is_symlink():
+                yield path
 
 class Guide(HTMLParser):
     def __init__(self):
@@ -35,11 +47,13 @@ class Guide(HTMLParser):
             self.buttons.append(a)
 
 def main():
-    for p in ROOT.rglob('*.py'):
-        if 'private' in p.relative_to(ROOT).parts:continue
-        ast.parse(p.read_text(), feature_version=(3, 10))
-    for p in ROOT.rglob('*.json'):
-        if '.git' not in p.parts and 'private' not in p.relative_to(ROOT).parts:
+    files = list(source_files())
+    for p in files:
+        if p.suffix == '.py':
+            # Standalone onboarding remains 3.10; the service explicitly needs 3.11.
+            version = (3, 11) if p.is_relative_to(ROOT / 'services') else (3, 10)
+            ast.parse(p.read_text(), feature_version=version)
+        if p.suffix == '.json':
             json.loads(p.read_text())
     subprocess.run(['sh', '-n', str(ROOT / 'setup')], check=True)
     page = (ROOT / 'START-HERE.html').read_text()
@@ -48,7 +62,7 @@ def main():
     assert len(guide.ids) == len(set(guide.ids)), 'Duplicate HTML IDs'
     assert set(guide.anchors) <= set(guide.ids), 'Broken section anchor'
     assert not guide.external, 'Guide must be self-contained'
-    assert len(guide.images) == 3 and all(x.startswith('data:image/png;base64,') for x in guide.images)
+    assert not guide.images and '<svg ' in page, 'Guide must embed its architecture diagram'
     assert {x['data-journey'] for x in guide.journeys} == {'admin', 'developer'}
     assert all('hidden' in x for x in guide.journeys), 'No journey may be selected initially'
     assert len(guide.buttons) == 2 and all(x.get('aria-pressed') == 'false' for x in guide.buttons)
@@ -62,8 +76,8 @@ def main():
         for target in re.findall(r'\]\(([^)]+)\)', doc.read_text()):
             if '://' not in target and not target.startswith('#'):
                 assert (doc.parent / target.split('#')[0]).exists(), f'Broken file link: {target}'
-    assert not [p for p in ROOT.rglob('*.invite.json') if 'private' not in p.relative_to(ROOT).parts], 'Invitation found in package'
-    print('PASS: Python 3.10 syntax, JSON, shell, inline JavaScript, guide assets/roles/anchors and documentation file links.')
+    assert not [p for p in files if p.name.endswith('.invite.json')], 'Invitation found in package'
+    print('PASS: Python compatibility (onboarding 3.10 / service 3.11), JSON, shell, inline JavaScript, guide assets/roles/anchors and documentation file links.')
 
 if __name__ == '__main__':
     main()

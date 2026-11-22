@@ -1,26 +1,36 @@
 {
-  "checked_on": "2026-11-10",
-  "automated_tests": 17,
-  "compatibility": {
-    "litellm": "1.108.0",
-    "claude_code": "2.1.317",
-    "platform": "macOS",
-    "python_minimum": "3.10"
+  "architecture": "claude-code-aca-litellm-fusion-only",
+  "revision_date": "2026-11-22",
+  "status": "local-validation-passed",
+  "checks": {
+    "root_unit_tests": 38,
+    "service_tests": 118,
+    "terraform_mocked_plans": 21,
+    "pinned_litellm_wire_cases": 11,
+    "full_integration_groups": 19,
+    "docker_builds": [
+      "linux/arm64",
+      "linux/amd64"
+    ],
+    "native_sdk_offline_probes": [
+      "linux/arm64",
+      "linux/amd64"
+    ],
+    "claude_code_client": {
+      "version": "2.1.296",
+      "temporary_profile": true,
+      "requests": 1,
+      "default_tool_declarations": 20,
+      "live_provider_requests": 0
+    },
+    "independent_reviews": {
+      "security": "approved",
+      "azure": "approved",
+      "functional": "approved"
+    },
+    "package_public_scan_workflow_lint": "passed"
   },
-  "results": {
-    "primary_models": 3,
-    "direct_copilot_models": 4,
-    "read_tool_routes": 3,
-    "genuine_fallback_routes": 3,
-    "admin_invitation": "passed",
-    "developer_onboarding": "passed",
-    "settings_restore": "passed",
-    "no_automatic_email": "passed"
-  },
-  "scope": [
-    "Live provider results summarize previous acceptance checks; raw telemetry is not distributed.",
-    "First-time browser consent and customer-specific network and managed policies require deployment verification.",
-    "Read-tool success does not certify native WebSearch or every tool.",
-    "Optional Copilot Opus and uninterrupted partial-stream failover were not verified."
-  ]
+  "live_fusion_inference": "not-run-no-user-credential",
+  "azure_deployment": "not-run-in-this-revision",
+  "claude_code_settings": "not-modified-in-this-revision"
 }

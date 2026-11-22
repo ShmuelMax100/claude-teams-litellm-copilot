@@ -1,0 +1,15 @@
+# Security and identity isolation
+
+LiteLLM is the only public application. Fusion has private ingress in the same ACA environment and requires both a service bearer and a signed, short-lived user assertion. Only the authenticated LiteLLM user ID selects a credential. Client headers, body fields, metadata, provider keys and deployment overrides cannot change the user or route.
+
+Each user's PAT lives in a distinct Key Vault secret. Terraform binds that secret and declared expiry to one approved subject. The gateway identity reads its database/master/salt and service/signing secrets, not GitHub tokens. The Fusion identity reads the service/signing secrets and the approved PAT secrets with individual scopes. Shared PAT values, reused secret scopes, expired bindings and service/PAT overlap are rejected. Configured secret values must not prefix-overlap, so streaming redaction cannot expose the suffix of a longer secret. The HMAC nonce is not a distributed replay database; TLS, private ingress, short expiry and secret protection remain required.
+
+SDK sessions use explicit per-session credentials in empty mode, fresh UUIDs, private temporary workspaces, denied built-in permissions and no ambient login/instructions/memory. Caller tool definitions are declarations only. Tool names, arguments and IDs are validated before release; credential-bearing calls are rejected. Text output filters configured secrets across streaming chunk boundaries. Session cleanup also runs on cancellation and timeout; unrecoverable cleanup makes the runtime unavailable.
+
+The static gateway catalog contains only Fusion routes. The guard rejects a non-Fusion deployment even if obsolete database configuration exists, disables retries and clears all router failover policies. Shared-route cooldowns are disabled so a user-specific credential error cannot deny other users. Unrecognized advanced options fail rather than launching a hidden summarization or alternate model request. Service and authorization errors are sanitized; request logging is disabled. Health checks and onboarding do not invoke a model.
+
+Protect Terraform state and saved plans: they include generated secrets. Keep local files private, use an access-controlled encrypted remote state backend for a shared deployment, and never commit plans, state, PATs or invitations. Local developer setup uses private backups and validates before writing settings.
+
+Revoke the personal gateway key and GitHub PAT to remove access. Updating a Key Vault secret alone is not immediate revocation: versionless ACA references refresh on their documented schedule and restart affected revisions. The declared PAT expiry provides a local deny boundary; early revocation is detected by GitHub. Expired credentials affect that user and must not cause a container-wide restart.
+
+No security claim is made for malicious code running inside the same trusted container or for compromised administrator/signing credentials. Separation here is request/session identity within a trusted service, not a separate operating-system tenant for each user.

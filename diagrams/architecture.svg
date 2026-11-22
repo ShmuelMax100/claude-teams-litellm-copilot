@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 300" role="img" aria-labelledby="title desc">
+  <title id="title">Claude Code connects to Azure Container Apps</title>
+  <desc id="desc">One arrow connects Claude Code to an Azure Container Apps environment containing LiteLLM and a private Fusion service with Copilot SDK. All model requests use this route.</desc>
+  <defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#2267a8"/></marker></defs>
+  <rect width="960" height="300" rx="20" fill="#f3f6fa"/>
+  <g font-family="system-ui,sans-serif" fill="#142b42">
+    <rect x="30" y="103" width="190" height="94" rx="15" fill="white" stroke="#94adc2"/>
+    <text x="125" y="144" font-size="22" font-weight="650" text-anchor="middle">Claude Code</text>
+    <text x="125" y="172" font-size="14" text-anchor="middle">Personal gateway key</text>
+    <path d="M 220 150 H 307" stroke="#2267a8" stroke-width="3" marker-end="url(#arrow)"/>
+    <text x="264" y="132" font-size="12" text-anchor="middle">HTTPS</text>
+    <rect x="310" y="32" width="620" height="236" rx="18" fill="#e6f0fa" stroke="#2267a8" stroke-width="2"/>
+    <text x="338" y="70" font-size="22" font-weight="650">Azure Container Apps</text>
+    <text x="338" y="92" font-size="13">One environment · one public entry point</text>
+    <rect x="342" y="116" width="198" height="105" rx="12" fill="white" stroke="#94adc2"/>
+    <text x="441" y="153" font-size="23" text-anchor="middle">LiteLLM</text>
+    <text x="441" y="178" font-size="13" text-anchor="middle">Identity + model adapter</text>
+    <text x="441" y="198" font-size="13" text-anchor="middle">Public HTTPS</text>
+    <path d="M 540 168 H 617" stroke="#2267a8" stroke-width="3" marker-end="url(#arrow)"/>
+    <rect x="620" y="116" width="275" height="105" rx="12" fill="white" stroke="#94adc2"/>
+    <text x="757" y="151" font-size="23" text-anchor="middle">Fusion service</text>
+    <text x="757" y="177" font-size="14" text-anchor="middle">Copilot SDK · per-user sessions</text>
+    <text x="757" y="199" font-size="13" text-anchor="middle">Private model API + MCP</text>
+    <text x="620" y="247" font-size="13" text-anchor="middle">Standard · High · Max — internal routing belongs to Fusion</text>
+  </g>
+</svg>
